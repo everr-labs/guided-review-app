@@ -9,11 +9,7 @@ import type {
 	ToolCallItem,
 } from "./types/section";
 import type { ClonedRepo, SessionSource } from "./acp";
-import {
-	createDiffFocusRange,
-	type DiffFocusRange,
-	type DiffFocusSide,
-} from "./diffFocus";
+import type { DiffFocusRange } from "./diffFocus";
 import { recordClientTelemetry, truncateTelemetryText } from "./telemetry";
 
 export interface SessionInfo {
@@ -41,14 +37,6 @@ export interface CommentDraftState {
 interface AssistantChunkMeta {
 	sessionId?: string;
 	messageId?: string;
-}
-
-interface LegacyQuotedContext {
-	id: string;
-	file_path?: string;
-	start_line?: number;
-	end_line?: number;
-	side?: DiffFocusSide;
 }
 
 interface AppState {
@@ -99,7 +87,6 @@ interface AppState {
 	addPendingDiffReference: (range: DiffFocusRange) => void;
 	removePendingDiffReference: (id: string) => void;
 	clearPendingDiffReferences: () => void;
-	addContext: (ctx: LegacyQuotedContext) => void;
 }
 
 const LS_KEYS = {
@@ -528,21 +515,4 @@ export const useApp = create<AppState>((set) => ({
 			),
 		})),
 	clearPendingDiffReferences: () => set({ pendingDiffReferences: [] }),
-	addContext: (ctx) =>
-		set((state) => {
-			if (!ctx.file_path || !ctx.start_line) return {};
-			const range = createDiffFocusRange({
-				id: ctx.id,
-				file_path: ctx.file_path,
-				start_line: ctx.start_line,
-				end_line: ctx.end_line ?? ctx.start_line,
-				side: ctx.side ?? "RIGHT",
-				source: "user",
-				mode: "draft-reference",
-			});
-			if (!range) return {};
-			return {
-				pendingDiffReferences: [...state.pendingDiffReferences, range],
-			};
-		}),
 }));
