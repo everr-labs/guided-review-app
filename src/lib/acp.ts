@@ -8,7 +8,7 @@ import {
 } from "./telemetry";
 import { publishCommentTelemetryAttrs } from "./commentPublish";
 
-export type AgentKind = "claude_code" | "codex" | "fake";
+export type AgentKind = "claude_code" | "codex";
 
 export interface AgentInfo {
 	kind: AgentKind;
