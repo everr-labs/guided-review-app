@@ -8,10 +8,11 @@ import { acp } from "@/lib/acp";
 import { SeverityBadge } from "./SeverityBadge";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
 import { Button } from "@/components/ui/button";
-import { Plus, X } from "lucide-react";
+import { LocateFixed, Plus, X } from "lucide-react";
 import {
 	createDiffFocusRange,
 	diffLineSelectionFromCandidates,
+	formatDiffFocusHeader,
 	formatDiffReferenceLabel,
 	normalizeLineRange,
 	type DiffFocusRange,
@@ -326,8 +327,10 @@ export function DiffPane() {
 	const currentId = useApp((s) => s.currentSectionId);
 	const sections = useApp((s) => s.sections);
 	const diffFocus = useApp((s) => s.diffFocus);
+	const diffFocusError = useApp((s) => s.diffFocusError);
 	const setDiffFocus = useApp((s) => s.setDiffFocus);
 	const clearDiffFocus = useApp((s) => s.clearDiffFocus);
+	const setDiffFocusError = useApp((s) => s.setDiffFocusError);
 	const addPendingDiffReference = useApp((s) => s.addPendingDiffReference);
 
 	const current = useMemo(
@@ -339,12 +342,37 @@ export function DiffPane() {
 	const [bundles, setBundles] = useState<FileBundle[]>([]);
 	const [loading, setLoading] = useState(false);
 	const [loadError, setLoadError] = useState<string | null>(null);
+	const [agentFocusLabel, setAgentFocusLabel] = useState<string | null>(null);
 
 	useEffect(() => {
-		if (diffFocus?.source === "user") {
-			clearDiffFocus(diffFocus.id);
+		setAgentFocusLabel(null);
+		const currentFocus = useApp.getState().diffFocus;
+		if (currentFocus?.source === "user") {
+			clearDiffFocus(currentFocus.id);
 		}
-	}, [currentId, clearDiffFocus, diffFocus]);
+	}, [currentId, clearDiffFocus]);
+
+	useEffect(() => {
+		setDiffFocusError(null);
+	}, [currentId, setDiffFocusError]);
+
+	useEffect(() => {
+		if (diffFocus?.source !== "agent") return;
+		const label = formatDiffFocusHeader(diffFocus);
+		setAgentFocusLabel(label);
+		const timeout = window.setTimeout(() => setAgentFocusLabel(null), 4500);
+		return () => window.clearTimeout(timeout);
+	}, [diffFocus]);
+
+	useEffect(() => {
+		if (!diffFocus || loading || loadError) return;
+		const visible = bundles.some((b) => b.file_path === diffFocus.file_path);
+		if (!visible) {
+			setDiffFocusError(
+				`${diffFocus.file_path} is not visible in the current diff section.`,
+			);
+		}
+	}, [bundles, diffFocus, loading, loadError, setDiffFocusError]);
 
 	useEffect(() => {
 		recordClientTelemetry("client.diff.current_section.evaluated", {
@@ -459,6 +487,12 @@ export function DiffPane() {
 						{section!.head_ref}
 					</span>
 				</div>
+				{agentFocusLabel && (
+					<div className="mt-2 inline-flex items-center gap-1.5 rounded border border-primary/40 bg-primary/10 px-2 py-1 font-mono text-[11px] text-primary">
+						<LocateFixed className="size-3" />
+						{agentFocusLabel}
+					</div>
+				)}
 			</header>
 
 			<div className="flex flex-col gap-4 p-4">
@@ -468,6 +502,11 @@ export function DiffPane() {
 				{loadError && (
 					<div className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive-foreground">
 						{loadError}
+					</div>
+				)}
+				{diffFocusError && (
+					<div className="rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-xs text-primary">
+						{diffFocusError}
 					</div>
 				)}
 				{!loading && !loadError && bundles.length === 0 && (
