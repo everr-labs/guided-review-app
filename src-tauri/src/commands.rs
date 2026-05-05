@@ -1,0 +1,253 @@
+use crate::acp_client::{start_session, AcpSessions};
+use crate::agent_runner::{list_agents, AgentInfo, AgentKind};
+use crate::comments::{publish, PrTarget};
+use crate::projects::{self, RecentProject};
+use crate::repo::{
+    get_diff, get_file_at_ref, inspect_origin, parse_pr_url, resolve_source, ClonedRepo, DiffPatch,
+    GithubRepoInfo, SessionSource,
+};
+use crate::section::CommentDraft;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use tauri::{AppHandle, State};
+use tracing::Instrument;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartSessionRequest {
+    pub source: SessionSource,
+    pub agent_kind: AgentKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartSessionResponse {
+    pub session_id: String,
+    pub repo: ClonedRepo,
+    pub source: SessionSource,
+}
+
+const AGENT_SKILL: &str = include_str!("../../agent-skill.md");
+
+#[tauri::command]
+pub async fn list_agents_cmd() -> Vec<AgentInfo> {
+    list_agents()
+}
+
+#[tauri::command]
+pub async fn agent_skill_cmd() -> &'static str {
+    AGENT_SKILL
+}
+
+#[tauri::command]
+pub async fn start_session_cmd(
+    app: AppHandle,
+    sessions: State<'_, AcpSessions>,
+    req: StartSessionRequest,
+) -> Result<StartSessionResponse, String> {
+    let span = tracing::info_span!(
+        "session.start",
+        agent = ?req.agent_kind,
+        source = ?req.source,
+    );
+    async move {
+        let cloned = resolve_source(&req.source)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "resolve_source failed");
+                e.to_string()
+            })?;
+        tracing::info!(repo = %cloned.display_slug, head = %cloned.head_ref, base = %cloned.base_ref, "repo ready");
+
+        let session = start_session(app, req.agent_kind, cloned.path.clone())
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "start_session failed");
+                e.to_string()
+            })?;
+        let session_id = session.session_id.clone();
+        tracing::info!(session_id = %session_id, "acp session created");
+        sessions.insert(session).await;
+
+        let now = chrono_now();
+        let recent = match &req.source {
+            SessionSource::Pr {
+                repo_url, number, ..
+            } => {
+                let (owner, repo) = parse_owner_repo(repo_url);
+                Some(RecentProject::Pr {
+                    repo_url: repo_url.clone(),
+                    owner,
+                    repo,
+                    number: *number,
+                    last_opened: now,
+                })
+            }
+            SessionSource::Branch {
+                repo_url, branch, ..
+            } => {
+                let (owner, repo) = parse_owner_repo(repo_url);
+                Some(RecentProject::Branch {
+                    repo_url: repo_url.clone(),
+                    owner,
+                    repo,
+                    branch: branch.clone(),
+                    last_opened: now,
+                })
+            }
+            SessionSource::Sha { .. } => None,
+            SessionSource::Local { path }
+            | SessionSource::LocalPr { path, .. }
+            | SessionSource::LocalBranch { path, .. } => Some(RecentProject::Local {
+                path: path.clone(),
+                label: cloned.display_slug.clone(),
+                last_opened: now,
+            }),
+        };
+        if let Some(r) = recent {
+            let _ = projects::record(r).await;
+        }
+
+        Ok(StartSessionResponse {
+            session_id,
+            repo: cloned,
+            source: req.source,
+        })
+    }
+    .instrument(span)
+    .await
+}
+
+fn parse_owner_repo(url: &str) -> (String, String) {
+    if let Some(parsed) = url::Url::parse(url).ok() {
+        let segs: Vec<&str> = parsed
+            .path_segments()
+            .map(|s| s.collect())
+            .unwrap_or_default();
+        if segs.len() >= 2 {
+            return (
+                segs[0].to_string(),
+                segs[1].trim_end_matches(".git").to_string(),
+            );
+        }
+    }
+    (String::new(), String::new())
+}
+
+fn chrono_now() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn parse_pr_url_cmd(url: String) -> Option<(String, String, u64)> {
+    parse_pr_url(&url)
+}
+
+#[tauri::command]
+pub async fn list_recent_projects_cmd() -> Vec<RecentProject> {
+    projects::load().await.unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn inspect_local_repo_origin_cmd(path: PathBuf) -> Result<GithubRepoInfo, String> {
+    inspect_origin(&path).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn record_recent_project_cmd(project: RecentProject) -> Result<(), String> {
+    projects::record(project)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[tracing::instrument(skip(sessions), fields(session_id = %session_id))]
+pub async fn send_message_cmd(
+    sessions: State<'_, AcpSessions>,
+    session_id: String,
+    text: String,
+    origin: Option<String>,
+    reason: Option<String>,
+    section_id: Option<String>,
+) -> Result<(), String> {
+    let sess = sessions
+        .get(&session_id)
+        .await
+        .ok_or_else(|| "unknown session".to_string())?;
+    tracing::info!(
+        len = text.len(),
+        origin = origin.as_deref().unwrap_or("unknown"),
+        reason = reason.as_deref().unwrap_or("unknown"),
+        section_id = section_id.as_deref().unwrap_or(""),
+        "user prompt",
+    );
+    sess.send_prompt(text, origin, reason, section_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn end_session_cmd(
+    sessions: State<'_, AcpSessions>,
+    session_id: String,
+) -> Result<(), String> {
+    if let Some(sess) = sessions.remove(&session_id).await {
+        sess.join.abort();
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetFileAtRefArgs {
+    pub repo_path: PathBuf,
+    pub file_path: String,
+    pub refspec: String,
+}
+
+#[tauri::command]
+pub async fn get_file_at_ref_cmd(args: GetFileAtRefArgs) -> Result<Option<String>, String> {
+    let path = args.repo_path;
+    let file = args.file_path;
+    let refspec = args.refspec;
+    tokio::task::spawn_blocking(move || get_file_at_ref(&path, &file, &refspec))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetDiffArgs {
+    pub repo_path: PathBuf,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub file_path: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_diff_cmd(args: GetDiffArgs) -> Result<Vec<DiffPatch>, String> {
+    let path = args.repo_path;
+    let base = args.base_ref;
+    let head = args.head_ref;
+    let file = args.file_path;
+    tokio::task::spawn_blocking(move || get_diff(&path, &base, &head, file.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishCommentArgs {
+    pub target: PrTarget,
+    pub draft: CommentDraft,
+    pub head_sha: String,
+}
+
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(target = ?args.target, kind = ?args.draft.kind))]
+pub async fn publish_comment_cmd(args: PublishCommentArgs) -> Result<Option<String>, String> {
+    publish(&args.target, &args.draft, &args.head_sha)
+        .await
+        .map_err(|e| e.to_string())
+}
