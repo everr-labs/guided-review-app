@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { CommentDraft, ReviewSection, SectionMap } from "./types/section";
+import type { DiffFocusPayload } from "./diffFocus";
 import {
 	recordClientTelemetry,
 	recordClientTelemetryError,
@@ -121,6 +122,11 @@ export interface CommentDraftEvent {
 	session_id: string;
 	draft_id: string;
 	draft: CommentDraft;
+}
+
+export interface DiffFocusEvent {
+	session_id: string;
+	focus: DiffFocusPayload;
 }
 
 export interface AgentStderrEvent {
@@ -294,6 +300,7 @@ export type EventName =
 	| "acp://turn-done"
 	| "acp://error"
 	| "acp://comment-draft"
+	| "acp://diff-focus"
 	| "acp://comment-published"
 	| "acp://agent-stderr";
 
