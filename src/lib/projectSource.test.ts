@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-	localPrSourceFromSelection,
 	localRecentProjects,
+	localReviewSourceFromInput,
 	parsePrInput,
+	type LocalProject,
 	type LocalRepoOrigin,
 } from "./projectSource";
 import type { RecentProject } from "./acp";
@@ -13,6 +14,11 @@ const origin: LocalRepoOrigin = {
 	owner: "openai",
 	repo: "codex",
 	slug: "openai/codex",
+};
+
+const project: LocalProject = {
+	path: "/Users/guidodorsi/dev/codex",
+	origin,
 };
 
 test("parsePrInput accepts a plain PR number", () => {
@@ -55,54 +61,81 @@ test("parsePrInput rejects empty, zero, and non-GitHub values", () => {
 	);
 });
 
-test("localPrSourceFromSelection builds a local PR source from selected origin", () => {
+test("localReviewSourceFromInput accepts a PR number", () => {
 	assert.deepEqual(
-		localPrSourceFromSelection({
-			input: "https://github.com/openai/codex/pull/123",
-			localPath: "/Users/guidodorsi/dev/codex",
-			origin,
-		}),
+		localReviewSourceFromInput({ input: " 123 ", project }),
 		{
 			source: {
 				kind: "local_pr",
-				path: "/Users/guidodorsi/dev/codex",
-				repo_url: "https://github.com/openai/codex",
+				path: project.path,
+				repo_url: origin.repo_url,
 				number: 123,
 			},
 		},
 	);
 });
 
-test("localPrSourceFromSelection blocks mismatched PR URLs", () => {
+test("localReviewSourceFromInput accepts a matching GitHub PR URL", () => {
 	assert.deepEqual(
-		localPrSourceFromSelection({
-			input: "https://github.com/other/project/pull/123",
-			localPath: "/Users/guidodorsi/dev/codex",
-			origin,
+		localReviewSourceFromInput({
+			input: "https://github.com/openai/codex/pull/42",
+			project,
 		}),
 		{
-			error:
-				"This PR URL is for other/project, but the selected folder uses openai/codex as origin.",
+			source: {
+				kind: "local_pr",
+				path: project.path,
+				repo_url: origin.repo_url,
+				number: 42,
+			},
 		},
 	);
 });
 
-test("localPrSourceFromSelection explains missing local repo or origin", () => {
+test("localReviewSourceFromInput rejects mismatched PR URLs", () => {
 	assert.deepEqual(
-		localPrSourceFromSelection({
-			input: "123",
-			localPath: "",
-			origin,
+		localReviewSourceFromInput({
+			input: "https://github.com/other/project/pull/1",
+			project,
 		}),
-		{ error: "Choose a local repository folder first." },
+		{
+			error:
+				"This PR URL is for other/project, but the project's origin is openai/codex.",
+		},
+	);
+});
+
+test("localReviewSourceFromInput treats anything else as a branch or SHA", () => {
+	assert.deepEqual(
+		localReviewSourceFromInput({ input: "feature/foo", project }),
+		{
+			source: {
+				kind: "local_branch",
+				path: project.path,
+				branch: "feature/foo",
+			},
+		},
 	);
 	assert.deepEqual(
-		localPrSourceFromSelection({
-			input: "123",
-			localPath: "/Users/guidodorsi/dev/codex",
-			origin: null,
-		}),
-		{ error: "Choose a local GitHub repository folder first." },
+		localReviewSourceFromInput({ input: "abc1234", project }),
+		{
+			source: {
+				kind: "local_branch",
+				path: project.path,
+				branch: "abc1234",
+			},
+		},
+	);
+});
+
+test("localReviewSourceFromInput requires a project and non-empty input", () => {
+	assert.deepEqual(
+		localReviewSourceFromInput({ input: "123", project: null }),
+		{ error: "Choose a project first." },
+	);
+	assert.deepEqual(
+		localReviewSourceFromInput({ input: "  ", project }),
+		{ error: "Enter a PR number, PR URL, branch name, or commit SHA." },
 	);
 });
 

@@ -3,13 +3,14 @@ import type {
 	ChatItem,
 	ChatMessage,
 	CommentDraft,
+	CommentResult,
 	ReviewSection,
 	SectionMapEntry,
 	SectionStatus,
 	ToolCallItem,
 } from "./types/section";
 import type { ClonedRepo, SessionSource } from "./acp";
-import type { DiffFocusRange } from "./diffFocus";
+import type { LocalProject } from "./projectSource";
 import { recordClientTelemetry, truncateTelemetryText } from "./telemetry";
 
 export interface SessionInfo {
@@ -40,6 +41,7 @@ interface AssistantChunkMeta {
 }
 
 interface AppState {
+	project: LocalProject | null;
 	session: SessionInfo | null;
 	sections: SectionState[];
 	currentSectionId: string | null;
@@ -50,10 +52,9 @@ interface AppState {
 	errors: string[];
 	stderr: string[];
 	chatVisible: boolean;
-	diffFocus: DiffFocusRange | null;
-	diffFocusError: string | null;
-	pendingDiffReferences: DiffFocusRange[];
+	structuredReviewBlockOpen: boolean;
 
+	setProject: (p: LocalProject | null) => void;
 	setSession: (s: SessionInfo | null) => void;
 	reset: () => void;
 	setSectionMap: (entries: SectionMapEntry[]) => void;
@@ -73,6 +74,7 @@ interface AppState {
 
 	addCommentDraft: (id: string, draft: CommentDraft) => void;
 	updateCommentDraft: (id: string, patch: Partial<CommentDraftState>) => void;
+	applyCommentResult: (result: CommentResult) => void;
 
 	pushError: (e: string) => void;
 	dismissErrors: () => void;
@@ -80,13 +82,6 @@ interface AppState {
 	setStreaming: (s: boolean) => void;
 
 	toggleChat: () => void;
-
-	setDiffFocus: (range: DiffFocusRange | null) => void;
-	clearDiffFocus: (id?: string) => void;
-	setDiffFocusError: (error: string | null) => void;
-	addPendingDiffReference: (range: DiffFocusRange) => void;
-	removePendingDiffReference: (id: string) => void;
-	clearPendingDiffReferences: () => void;
 }
 
 const LS_KEYS = {
@@ -149,13 +144,68 @@ function appendStreamingText(
 }
 
 const STRUCTURED_REVIEW_BLOCK_RE =
-	/```(?:acp-section-map|acp-section|acp-comment-draft|acp-diff-focus)[^\n]*\n[\s\S]*?\n```[ \t]*(?:\r?\n)?/g;
+	/```(?:acp-section-map|acp-section|acp-comment-draft|acp-comment-result)[^\n]*\n[\s\S]*?\n```[ \t]*(?:\r?\n)?/g;
+const STRUCTURED_REVIEW_BLOCK_START_RE =
+	/```(?:acp-section-map|acp-section|acp-comment-draft|acp-comment-result)[^\n]*\r?\n/g;
 
-function stripStructuredReviewBlocks(text: string): string {
+function cleanVisibleStructuredText(text: string): string {
 	return text
 		.replace(STRUCTURED_REVIEW_BLOCK_RE, "")
 		.replace(/[ \t]+\r?\n/g, "\n")
 		.replace(/\n{3,}/g, "\n\n");
+}
+
+function findStructuredFenceCloseEnd(text: string, start: number): number | null {
+	if (text.startsWith("```", start)) {
+		const lineEnd = text.indexOf("\n", start);
+		return lineEnd === -1 ? text.length : lineEnd + 1;
+	}
+	const match = /\r?\n```[ \t]*(?:\r?\n)?/.exec(text.slice(start));
+	return match ? start + match.index + match[0].length : null;
+}
+
+function stripStructuredReviewBlocks(
+	text: string,
+	insideBlock: boolean,
+): { text: string; insideBlock: boolean } {
+	let cursor = 0;
+	let visible = "";
+	let hidden = insideBlock;
+
+	while (cursor < text.length) {
+		if (hidden) {
+			const closeEnd = findStructuredFenceCloseEnd(text, cursor);
+			if (closeEnd === null) {
+				return {
+					text: cleanVisibleStructuredText(visible),
+					insideBlock: true,
+				};
+			}
+			cursor = closeEnd;
+			hidden = false;
+			continue;
+		}
+
+		STRUCTURED_REVIEW_BLOCK_START_RE.lastIndex = cursor;
+		const startMatch = STRUCTURED_REVIEW_BLOCK_START_RE.exec(text);
+		if (!startMatch) {
+			visible += text.slice(cursor);
+			break;
+		}
+
+		visible += text.slice(cursor, startMatch.index);
+		cursor = startMatch.index + startMatch[0].length;
+		const closeEnd = findStructuredFenceCloseEnd(text, cursor);
+		if (closeEnd === null) {
+			return {
+				text: cleanVisibleStructuredText(visible),
+				insideBlock: true,
+			};
+		}
+		cursor = closeEnd;
+	}
+
+	return { text: cleanVisibleStructuredText(visible), insideBlock: false };
 }
 
 function finishStreamingMessages(chat: ChatMessage[]): ChatMessage[] {
@@ -178,6 +228,7 @@ function readableAssistantMessage(item: ChatItem): ChatMessage {
 }
 
 export const useApp = create<AppState>((set) => ({
+	project: null,
 	session: null,
 	sections: [],
 	currentSectionId: null,
@@ -188,9 +239,32 @@ export const useApp = create<AppState>((set) => ({
 	errors: [],
 	stderr: [],
 	chatVisible: loadBool(LS_KEYS.chatVisible, true),
-	diffFocus: null,
-	diffFocusError: null,
-	pendingDiffReferences: [],
+	structuredReviewBlockOpen: false,
+
+	setProject: (p) =>
+		set((state) => {
+			const samePath = state.project?.path === p?.path;
+			recordClientTelemetry("client.store.project.set", {
+				"project.path": p?.path,
+				"project.slug": p?.origin.slug,
+				"project.previous_path": state.project?.path,
+				"project.cleared_session": !samePath && !!state.session,
+			});
+			if (samePath) {
+				return { project: p };
+			}
+			return {
+				project: p,
+				session: null,
+				sections: [],
+				currentSectionId: null,
+				processingSectionId: null,
+				chat: [],
+				commentDrafts: [],
+				streaming: false,
+				structuredReviewBlockOpen: false,
+			};
+		}),
 
 	setSession: (s) => {
 		recordClientTelemetry("client.store.session.set", {
@@ -218,9 +292,7 @@ export const useApp = create<AppState>((set) => ({
 				chat: [],
 				commentDrafts: [],
 				streaming: false,
-				diffFocus: null,
-				diffFocusError: null,
-				pendingDiffReferences: [],
+				structuredReviewBlockOpen: false,
 			};
 		}),
 
@@ -340,11 +412,20 @@ export const useApp = create<AppState>((set) => ({
 			const chat = [...state.chat];
 			const last = chat[chat.length - 1];
 			const sessionId = meta?.sessionId ?? state.session?.session_id;
-			const visibleText = stripStructuredReviewBlocks(text);
-			if (!last && !visibleText) return { chat };
+			const stripped = stripStructuredReviewBlocks(
+				text,
+				state.structuredReviewBlockOpen,
+			);
+			const visibleText = stripped.text;
+			if (!last && !visibleText) {
+				return {
+					chat,
+					structuredReviewBlockOpen: stripped.insideBlock,
+				};
+			}
 			if (last && last.role === "assistant" && last.streaming) {
-				const merged = appendStreamingText(last.text, text);
-				const nextText = stripStructuredReviewBlocks(merged.text);
+				const merged = appendStreamingText(last.text, visibleText);
+				const nextText = cleanVisibleStructuredText(merged.text);
 				recordClientTelemetry("client.chat.assistant_chunk.merged", {
 					"acp.session_id": sessionId,
 					"acp.message_id": meta?.messageId,
@@ -362,7 +443,12 @@ export const useApp = create<AppState>((set) => ({
 					text: nextText,
 				};
 			} else {
-				if (!visibleText) return { chat };
+				if (!visibleText) {
+					return {
+						chat,
+						structuredReviewBlockOpen: stripped.insideBlock,
+					};
+				}
 				recordClientTelemetry("client.chat.assistant_message.started", {
 					"acp.session_id": sessionId,
 					"acp.message_id": meta?.messageId,
@@ -376,7 +462,7 @@ export const useApp = create<AppState>((set) => ({
 					streaming: true,
 				});
 			}
-			return { chat };
+			return { chat, structuredReviewBlockOpen: stripped.insideBlock };
 		}),
 
 	finishAssistantMessage: () =>
@@ -463,6 +549,29 @@ export const useApp = create<AppState>((set) => ({
 			),
 		})),
 
+	applyCommentResult: (result) =>
+		set((state) => ({
+			commentDrafts: state.commentDrafts.map((d) => {
+				if (d.id !== result.draft_id) return d;
+				if (result.status === "published") {
+					const draft = {
+						...d,
+						status: "published" as const,
+						url: result.url,
+					};
+					delete draft.error;
+					return draft;
+				}
+				const draft = {
+					...d,
+					status: "error" as const,
+					error: result.error || "The agent could not publish the comment.",
+				};
+				delete draft.url;
+				return draft;
+			}),
+		})),
+
 	pushError: (e) =>
 		set((state) => ({
 			errors: [...state.errors.slice(-49), e],
@@ -485,34 +594,4 @@ export const useApp = create<AppState>((set) => ({
 			return { chatVisible: next };
 		}),
 
-	setDiffFocus: (range) =>
-		set((state) => {
-			recordClientTelemetry("client.store.diff_focus.set", {
-				"acp.session_id": state.session?.session_id,
-				"focus.file_path": range?.file_path,
-				"focus.start_line": range?.start_line,
-				"focus.end_line": range?.end_line,
-				"focus.side": range?.side,
-				"focus.source": range?.source,
-				"focus.mode": range?.mode,
-			});
-			return { diffFocus: range, diffFocusError: null };
-		}),
-	clearDiffFocus: (id) =>
-		set((state) => {
-			if (id && state.diffFocus?.id !== id) return {};
-			return { diffFocus: null };
-		}),
-	setDiffFocusError: (error) => set({ diffFocusError: error }),
-	addPendingDiffReference: (range) =>
-		set((state) => ({
-			pendingDiffReferences: [...state.pendingDiffReferences, range],
-		})),
-	removePendingDiffReference: (id) =>
-		set((state) => ({
-			pendingDiffReferences: state.pendingDiffReferences.filter(
-				(r) => r.id !== id,
-			),
-		})),
-	clearPendingDiffReferences: () => set({ pendingDiffReferences: [] }),
 }));

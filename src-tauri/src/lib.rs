@@ -1,7 +1,6 @@
 mod acp_client;
 mod agent_runner;
 mod commands;
-mod comments;
 mod events;
 mod fenced;
 mod projects;
@@ -32,7 +31,6 @@ pub fn run() {
             end_session_cmd,
             get_file_at_ref_cmd,
             get_diff_cmd,
-            publish_comment_cmd,
             parse_pr_url_cmd,
             list_recent_projects_cmd,
             inspect_local_repo_origin_cmd,

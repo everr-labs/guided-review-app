@@ -1,4 +1,4 @@
-use crate::section::{CommentDraft, DiffFocus, ReviewSection, SectionMap};
+use crate::section::{CommentDraft, CommentResult, ReviewSection, SectionMap};
 use serde::Serialize;
 
 pub const EV_SECTION_MAP: &str = "acp://section-map";
@@ -9,7 +9,7 @@ pub const EV_TOOL_CALL_UPDATE: &str = "acp://tool-call-update";
 pub const EV_TURN_DONE: &str = "acp://turn-done";
 pub const EV_ERROR: &str = "acp://error";
 pub const EV_COMMENT_DRAFT: &str = "acp://comment-draft";
-pub const EV_DIFF_FOCUS: &str = "acp://diff-focus";
+pub const EV_COMMENT_RESULT: &str = "acp://comment-result";
 pub const EV_AGENT_STDERR: &str = "acp://agent-stderr";
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,9 +69,9 @@ pub struct CommentDraftEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DiffFocusEvent {
+pub struct CommentResultEvent {
     pub session_id: String,
-    pub focus: DiffFocus,
+    pub result: CommentResult,
 }
 
 #[derive(Debug, Clone, Serialize)]

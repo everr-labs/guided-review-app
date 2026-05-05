@@ -91,19 +91,19 @@ pub struct CommentDraft {
     pub side: Option<CommentSide>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum DiffFocusSide {
-    Left,
-    Right,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommentResultStatus {
+    Published,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiffFocus {
-    pub file_path: String,
-    pub start_line: u32,
-    pub end_line: u32,
-    pub side: DiffFocusSide,
+pub struct CommentResult {
+    pub draft_id: String,
+    pub status: CommentResultStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }

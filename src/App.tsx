@@ -9,17 +9,12 @@ import {
 	type TurnDoneEvent,
 	type ErrorEvent,
 	type CommentDraftEvent,
-	type DiffFocusEvent,
+	type CommentResultEvent,
 	type AgentStderrEvent,
 	type ToolCallEvent,
 	type ToolCallUpdateEvent,
 	type Unlisten,
 } from "@/lib/acp";
-import {
-	createDiffFocusRange,
-	parseDiffFocusPayload,
-	type DiffFocusPayload,
-} from "@/lib/diffFocus";
 import type {
 	Concern,
 	LineRange,
@@ -30,6 +25,7 @@ import type {
 	Severity,
 } from "@/lib/types/section";
 import { ProjectPicker } from "@/components/ProjectPicker";
+import { ReviewLauncher } from "@/components/ReviewLauncher";
 import { SectionList } from "@/components/SectionList";
 import { DiffPane } from "@/components/DiffView";
 import { ChatPanel } from "@/components/ChatPanel";
@@ -178,8 +174,7 @@ export default function App() {
 	const updateToolCallItem = useApp((s) => s.updateToolCallItem);
 	const pushError = useApp((s) => s.pushError);
 	const addCommentDraft = useApp((s) => s.addCommentDraft);
-	const setDiffFocus = useApp((s) => s.setDiffFocus);
-	const setDiffFocusError = useApp((s) => s.setDiffFocusError);
+	const applyCommentResult = useApp((s) => s.applyCommentResult);
 	const pushStderr = useApp((s) => s.pushStderr);
 	const chatVisible = useApp((s) => s.chatVisible);
 	const toggleChat = useApp((s) => s.toggleChat);
@@ -251,41 +246,6 @@ export default function App() {
 			addReviewSectionItem(p.section);
 		};
 
-		const handleDiffFocus = (sessionId: string, payload: DiffFocusPayload) => {
-			const focus = createDiffFocusRange({
-				...payload,
-				source: "agent",
-				mode: "navigation",
-			});
-			if (!focus) {
-				setDiffFocusError("Agent sent an invalid diff focus range.");
-				return;
-			}
-
-			const state = useApp.getState();
-			const matchingSection = state.sections.find((s) =>
-				s.section?.files.includes(focus.file_path),
-			);
-			if (matchingSection && state.currentSectionId !== matchingSection.id) {
-				setCurrentSection(matchingSection.id, "agent_diff_focus");
-			}
-			if (!matchingSection) {
-				setDiffFocusError(
-					`Could not find ${focus.file_path} in a loaded review section.`,
-				);
-			}
-
-			recordClientTelemetry("client.acp.diff_focus.received", {
-				"acp.session_id": sessionId,
-				"focus.file_path": focus.file_path,
-				"focus.start_line": focus.start_line,
-				"focus.end_line": focus.end_line,
-				"focus.side": focus.side,
-				"focus.has_matching_section": !!matchingSection,
-			});
-			setDiffFocus(focus);
-		};
-
 		const handleToolCall = async (p: ToolCallEvent) => {
 			const sectionMap = parseToolSectionMap(p.raw_input);
 			if (sectionMap) {
@@ -295,11 +255,6 @@ export default function App() {
 			const section = parseToolReviewSection(p.raw_input);
 			if (section) {
 				handleReviewSection({ session_id: p.session_id, section });
-				return;
-			}
-			const diffFocus = parseDiffFocusPayload(p.raw_input);
-			if (diffFocus) {
-				handleDiffFocus(p.session_id, diffFocus);
 				return;
 			}
 			addToolCallItem({
@@ -356,8 +311,15 @@ export default function App() {
 					});
 					addCommentDraft(p.draft_id, p.draft);
 				}),
-				on<DiffFocusEvent>("acp://diff-focus", (p) => {
-					handleDiffFocus(p.session_id, p.focus);
+				on<CommentResultEvent>("acp://comment-result", (p) => {
+					recordClientTelemetry("client.acp.comment_result.received", {
+						"acp.session_id": p.session_id,
+						"comment.draft_id": p.result.draft_id,
+						"comment.result.status": p.result.status,
+						"comment.result.has_url": !!p.result.url,
+						"comment.result.has_error": !!p.result.error,
+					});
+					applyCommentResult(p.result);
 				}),
 				on<AgentStderrEvent>("acp://agent-stderr", (p) => {
 					recordClientTelemetry("client.acp.agent_stderr.received", {
@@ -405,16 +367,15 @@ export default function App() {
 		updateToolCallItem,
 			pushError,
 			addCommentDraft,
-			setDiffFocus,
-			setDiffFocusError,
+			applyCommentResult,
 			pushStderr,
 		]);
 
 	return (
 		<div className="grid h-screen grid-rows-[44px_1fr] bg-background text-foreground">
-			<header className="flex items-center gap-4 border-b border-border bg-background px-3">
+			<header className="flex items-center gap-3 border-b border-border bg-background px-3">
 				<ProjectPicker />
-				<div className="flex-1" />
+				<ReviewLauncher />
 				{session && (
 					<span className="font-mono text-[11px] text-muted-foreground">
 						{session.repo.head_ref} ← {session.repo.base_ref}

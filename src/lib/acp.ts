@@ -1,13 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { CommentDraft, ReviewSection, SectionMap } from "./types/section";
-import type { DiffFocusPayload } from "./diffFocus";
+import type {
+	CommentDraft,
+	CommentResult,
+	ReviewSection,
+	SectionMap,
+} from "./types/section";
 import {
 	recordClientTelemetry,
 	recordClientTelemetryError,
-	truncateTelemetryText,
 } from "./telemetry";
-import { publishCommentTelemetryAttrs } from "./commentPublish";
+import { sendMessageTelemetryAttrs } from "./commentPublish";
 
 export type AgentKind = "claude_code" | "codex";
 
@@ -124,9 +127,9 @@ export interface CommentDraftEvent {
 	draft: CommentDraft;
 }
 
-export interface DiffFocusEvent {
+export interface CommentResultEvent {
 	session_id: string;
-	focus: DiffFocusPayload;
+	result: CommentResult;
 }
 
 export interface AgentStderrEvent {
@@ -138,6 +141,7 @@ export interface SendMessageOptions {
 	origin?: string;
 	sectionId?: string;
 	reason?: string;
+	suppressPreview?: boolean;
 }
 
 function payloadSessionId(payload: unknown): string | undefined {
@@ -222,14 +226,10 @@ export const acp = {
 		text: string,
 		options: SendMessageOptions = {},
 	) => {
-		recordClientTelemetry("client.acp.send_message.requested", {
-			"acp.session_id": session_id,
-			"message.origin": options.origin,
-			"message.reason": options.reason,
-			"section.id": options.sectionId,
-			"message.length": text.length,
-			"message.preview": truncateTelemetryText(text.slice(0, 1024)),
-		});
+		recordClientTelemetry(
+			"client.acp.send_message.requested",
+			sendMessageTelemetryAttrs({ session_id, text, options }),
+		);
 		try {
 			await invoke<void>("send_message_cmd", {
 				sessionId: session_id,
@@ -237,6 +237,7 @@ export const acp = {
 				origin: options.origin,
 				reason: options.reason,
 				sectionId: options.sectionId,
+				suppressPreview: options.suppressPreview,
 			});
 			recordClientTelemetry("client.acp.send_message.succeeded", {
 				"acp.session_id": session_id,
@@ -269,26 +270,6 @@ export const acp = {
 		head_ref: string;
 		file_path?: string | null;
 	}) => invoke<DiffPatch[]>("get_diff_cmd", { args }),
-	publishComment: (args: {
-		target: PrTarget;
-		draft: CommentDraft;
-		head_sha: string;
-	}) => {
-		const attrs = publishCommentTelemetryAttrs(args);
-		recordClientTelemetry("client.comment.publish.requested", attrs);
-		return invoke<string | null>("publish_comment_cmd", { args })
-			.then((url) => {
-				recordClientTelemetry("client.comment.publish.succeeded", {
-					...attrs,
-					"comment.published.has_url": !!url,
-				});
-				return url;
-			})
-			.catch((e) => {
-				recordClientTelemetryError("client.comment.publish.failed", e, attrs);
-				throw e;
-			});
-	},
 };
 
 export type EventName =
@@ -300,8 +281,7 @@ export type EventName =
 	| "acp://turn-done"
 	| "acp://error"
 	| "acp://comment-draft"
-	| "acp://diff-focus"
-	| "acp://comment-published"
+	| "acp://comment-result"
 	| "acp://agent-stderr";
 
 export function on<T>(name: EventName, handler: (payload: T) => void) {

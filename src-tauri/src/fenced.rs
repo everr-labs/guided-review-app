@@ -1,5 +1,5 @@
 use crate::events::*;
-use crate::section::{CommentDraft, DiffFocus, ReviewSection, SectionMap};
+use crate::section::{CommentDraft, CommentResult, ReviewSection, SectionMap};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter};
 const TAG_SECTION_MAP: &str = "acp-section-map";
 const TAG_SECTION: &str = "acp-section";
 const TAG_COMMENT_DRAFT: &str = "acp-comment-draft";
-const TAG_DIFF_FOCUS: &str = "acp-diff-focus";
+const TAG_COMMENT_RESULT: &str = "acp-comment-result";
 
 #[derive(Debug, Deserialize)]
 struct SectionMapWire {
@@ -69,7 +69,6 @@ impl FencedBuffers {
             handle_block(app, session_id, &tag, &body);
         }
     }
-
 }
 
 fn parse_lenient<T: DeserializeOwned>(body: &str) -> Result<T, String> {
@@ -91,16 +90,6 @@ fn snippet(body: &str) -> String {
     s
 }
 
-fn validate_diff_focus(focus: &DiffFocus) -> Result<(), String> {
-    if focus.file_path.trim().is_empty() {
-        return Err("file_path is required".to_string());
-    }
-    if focus.start_line == 0 || focus.end_line == 0 {
-        return Err("start_line and end_line must be positive".to_string());
-    }
-    Ok(())
-}
-
 fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
     match tag {
         TAG_SECTION_MAP => match parse_lenient::<SectionMapWire>(body) {
@@ -109,7 +98,11 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     schema_version: wire.schema_version.unwrap_or(1),
                     sections: wire.sections,
                 };
-                tracing::info!(session_id, sections = map.sections.len(), "section_map parsed");
+                tracing::info!(
+                    session_id,
+                    sections = map.sections.len(),
+                    "section_map parsed"
+                );
                 let _ = app.emit(
                     EV_SECTION_MAP,
                     SectionMapEvent {
@@ -188,33 +181,29 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                 tracing::warn!(session_id, error = %e, body_snippet = %snippet(body), "failed to parse comment draft");
             }
         },
-        TAG_DIFF_FOCUS => match parse_lenient::<DiffFocus>(body).and_then(|focus| {
-            validate_diff_focus(&focus)?;
-            Ok(focus)
-        }) {
-            Ok(focus) => {
+        TAG_COMMENT_RESULT => match parse_lenient::<CommentResult>(body) {
+            Ok(result) => {
                 tracing::info!(
                     session_id,
-                    file_path = %focus.file_path,
-                    start_line = focus.start_line,
-                    end_line = focus.end_line,
-                    "diff focus parsed",
+                    draft_id = %result.draft_id,
+                    status = ?result.status,
+                    "comment result parsed",
                 );
                 let _ = app.emit(
-                    EV_DIFF_FOCUS,
-                    DiffFocusEvent {
+                    EV_COMMENT_RESULT,
+                    CommentResultEvent {
                         session_id: session_id.to_string(),
-                        focus,
+                        result,
                     },
                 );
             }
             Err(e) => {
-                tracing::warn!(session_id, error = %e, body_snippet = %snippet(body), "failed to parse diff focus");
+                tracing::warn!(session_id, error = %e, body_snippet = %snippet(body), "failed to parse comment result");
                 let _ = app.emit(
                     EV_ERROR,
                     ErrorEvent {
                         session_id: Some(session_id.to_string()),
-                        error: format!("diff focus JSON invalid: {e}"),
+                        error: format!("comment result JSON invalid: {e}"),
                     },
                 );
             }
@@ -237,7 +226,7 @@ fn extract_fenced_blocks(buf: &str) -> Vec<(String, String, usize)> {
         if tag_line != TAG_SECTION_MAP
             && tag_line != TAG_SECTION
             && tag_line != TAG_COMMENT_DRAFT
-            && tag_line != TAG_DIFF_FOCUS
+            && tag_line != TAG_COMMENT_RESULT
         {
             search = after_open;
             continue;
@@ -257,4 +246,53 @@ fn extract_fenced_blocks(buf: &str) -> Vec<(String, String, usize)> {
         search = trimmed_close_end;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_lenient;
+    use crate::section::{CommentResult, CommentResultStatus};
+
+    #[test]
+    fn parses_comment_result_block_body() {
+        let result: CommentResult = parse_lenient(
+            r#"{
+                "draft_id": "draft-123",
+                "status": "published",
+                "url": "https://github.com/garden-co/jazz/pull/787#discussion_r1"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.draft_id, "draft-123");
+        assert_eq!(result.status, CommentResultStatus::Published);
+        assert_eq!(
+            result.url.as_deref(),
+            Some("https://github.com/garden-co/jazz/pull/787#discussion_r1")
+        );
+    }
+
+    #[test]
+    fn rejects_comment_result_without_draft_id() {
+        let result = parse_lenient::<CommentResult>(
+            r#"{
+                "status": "published",
+                "url": "https://github.com/garden-co/jazz/pull/787#discussion_r1"
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_comment_result_with_invalid_status() {
+        let result = parse_lenient::<CommentResult>(
+            r#"{
+                "draft_id": "draft-123",
+                "status": "queued"
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
 }

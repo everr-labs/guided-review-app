@@ -1,0 +1,167 @@
+<style>
+  .mock-shell {
+    margin-top: 18px;
+    border: 1px solid #273244;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #0d1117;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+  }
+  .mock-file {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px;
+    border-bottom: 1px solid #273244;
+    color: #c9d1d9;
+    background: #161b22;
+  }
+  .mock-line {
+    display: grid;
+    grid-template-columns: 46px 1fr;
+    min-height: 25px;
+    line-height: 25px;
+  }
+  .mock-num {
+    padding-right: 12px;
+    text-align: right;
+    color: #7d8590;
+    background: #161b22;
+    border-right: 1px solid #273244;
+    user-select: none;
+  }
+  .mock-code {
+    padding: 0 12px;
+    color: #d1d7e0;
+    white-space: nowrap;
+  }
+  .add .mock-code { background: rgba(46, 160, 67, 0.18); }
+  .del .mock-code { background: rgba(248, 81, 73, 0.18); }
+  .selected .mock-num {
+    color: #fff;
+    background: #1f6feb;
+  }
+  .selected .mock-code {
+    background: rgba(56, 139, 253, 0.22);
+    box-shadow: inset 3px 0 #1f6feb;
+  }
+  .hovered .mock-num {
+    color: #fff;
+    background: #30363d;
+  }
+  .mock-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 10px;
+    border-top: 1px solid #273244;
+    color: #8b949e;
+    background: #101722;
+  }
+  .button-row {
+    display: flex;
+    gap: 6px;
+  }
+  .mock-button {
+    border: 1px solid #3b485c;
+    border-radius: 6px;
+    padding: 5px 8px;
+    color: #f0f6fc;
+    background: #1f2937;
+    font: 600 11px system-ui;
+  }
+  .primary {
+    border-color: #2f81f7;
+    background: #1f6feb;
+  }
+  .chat-preview {
+    margin-top: 16px;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #111827;
+  }
+  .chat-header {
+    padding: 8px 10px;
+    border-bottom: 1px solid #334155;
+    color: #94a3b8;
+    font: 600 12px system-ui;
+  }
+  .chat-body {
+    padding: 10px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: #dbeafe;
+    background: rgba(30, 41, 59, 0.75);
+    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+</style>
+
+<h2>Revised line quote design</h2>
+<p class="subtitle">This combines the quiet line interaction from Option B with the clear action buttons from Option A. No plus icon.</p>
+
+<div class="mockup">
+  <div class="mockup-header">Preview: click a line number, then use the action bar</div>
+  <div class="mockup-body">
+    <div class="mock-shell">
+      <div class="mock-file">
+        <span>src/lib/store.ts</span>
+        <span>Click line numbers to select exact code references</span>
+      </div>
+      <div class="mock-line">
+        <div class="mock-num">40</div>
+        <div class="mock-code">function appendStreamingText(current, next) {</div>
+      </div>
+      <div class="mock-line hovered add">
+        <div class="mock-num">41</div>
+        <div class="mock-code">  const overlap = sharedBoundaryLength(current, next);</div>
+      </div>
+      <div class="mock-line selected add">
+        <div class="mock-num">42</div>
+        <div class="mock-code">  if (overlap &gt; 0) return current + next.slice(overlap);</div>
+      </div>
+      <div class="mock-line selected add">
+        <div class="mock-num">43</div>
+        <div class="mock-code">  return current + next;</div>
+      </div>
+      <div class="mock-line">
+        <div class="mock-num">44</div>
+        <div class="mock-code">}</div>
+      </div>
+      <div class="mock-toolbar">
+        <span>2 lines selected</span>
+        <div class="button-row">
+          <span class="mock-button primary">Quote lines 42-43</span>
+          <span class="mock-button">Clear</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-preview">
+      <div class="chat-header">Chat composer reference</div>
+      <div class="chat-body">
+        <span class="chip">src/lib/store.ts:42-43 · 2 lines</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="options" style="margin-top: 18px;">
+  <div class="option" data-choice="approved-revised-design" onclick="toggleSelect(this)">
+    <div class="letter">✓</div>
+    <div class="content">
+      <h3>Looks right</h3>
+      <p>Use this design: no plus icon, line-number selection, action buttons at the bottom of the diff file.</p>
+    </div>
+  </div>
+</div>

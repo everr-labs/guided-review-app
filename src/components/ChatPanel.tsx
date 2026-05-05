@@ -11,15 +11,9 @@ import {
 	ListChecks,
 	LoaderCircle,
 	Map,
-	Quote,
 	Wrench,
-	X,
 } from "lucide-react";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
-import {
-	formatDiffReferenceForMessage,
-	formatDiffReferenceLabel,
-} from "@/lib/diffFocus";
 import type { ChatItem, Concern } from "@/lib/types/section";
 
 function FeedbackList({ title, concerns }: { title: string; concerns: Concern[] }) {
@@ -153,17 +147,10 @@ export function ChatPanel() {
 	const chat = useApp((s) => s.chat);
 	const drafts = useApp((s) => s.commentDrafts);
 	const streaming = useApp((s) => s.streaming);
-	const pendingDiffReferences = useApp((s) => s.pendingDiffReferences);
 	const sections = useApp((s) => s.sections);
 	const processingSectionId = useApp((s) => s.processingSectionId);
 	const addUserMessage = useApp((s) => s.addUserMessage);
 	const pushError = useApp((s) => s.pushError);
-	const removePendingDiffReference = useApp(
-		(s) => s.removePendingDiffReference,
-	);
-	const clearPendingDiffReferences = useApp(
-		(s) => s.clearPendingDiffReferences,
-	);
 
 	const [input, setInput] = useState("");
 	const scrollerRef = useRef<HTMLDivElement>(null);
@@ -176,30 +163,19 @@ export function ChatPanel() {
 		queueMicrotask(() => {
 			if (scrollerRef.current) {
 				scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
-			}
-		});
-	}, [chat, drafts, streaming, pendingDiffReferences]);
-
-	function buildMessage(): string {
-		if (pendingDiffReferences.length === 0) return input.trim();
-		const refs = pendingDiffReferences
-			.map((r) => formatDiffReferenceForMessage(r))
-			.join("\n");
-		const trimmedInput = input.trim();
-		return trimmedInput ? `${refs}\n\n${trimmedInput}` : refs;
-	}
+		}
+	});
+	}, [chat, drafts, streaming]);
 
 	async function send() {
-		const text = buildMessage();
+		const text = input.trim();
 		if (!text || !session) return;
 		recordClientTelemetry("client.chat.send.requested", {
 			"acp.session_id": session.session_id,
 			"message.length": text.length,
-			"context.count": pendingDiffReferences.length,
 		});
 		setInput("");
 		addUserMessage(text);
-		clearPendingDiffReferences();
 		try {
 			await acp.sendMessage(session.session_id, text, {
 				origin: "chat_panel_user_send",
@@ -305,29 +281,6 @@ export function ChatPanel() {
 						</span>
 					</div>
 				)}
-				{pendingDiffReferences.length > 0 && (
-					<div className="flex flex-wrap gap-1.5">
-						{pendingDiffReferences.map((c) => (
-							<div
-								key={c.id}
-								className="group flex max-w-full items-center gap-1 rounded-md border border-border bg-secondary/60 px-2 py-1 text-[11px]"
-							>
-								<Quote className="size-3 shrink-0 text-muted-foreground" />
-								<span className="truncate font-mono">
-									{formatDiffReferenceLabel(c)}
-								</span>
-								<button
-									type="button"
-									onClick={() => removePendingDiffReference(c.id)}
-									className="ml-0.5 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-									aria-label="Remove reference"
-								>
-									<X className="size-3" />
-								</button>
-							</div>
-						))}
-					</div>
-				)}
 				<Textarea
 					ref={textareaRef}
 					value={input}
@@ -345,10 +298,7 @@ export function ChatPanel() {
 					<Button
 						size="sm"
 						onClick={send}
-						disabled={
-							!session ||
-							(!input.trim() && pendingDiffReferences.length === 0)
-						}
+						disabled={!session || !input.trim()}
 					>
 						Send
 					</Button>

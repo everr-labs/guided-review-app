@@ -18,6 +18,7 @@ You may use your built-in tools (read files, run shell commands like `git diff -
 2. When the user asks to see a section (or says "go ahead"), emit one ` ```acp-section ` block for that section. Then stop. Render concerns and uncovered scenarios via the JSON fields — do not duplicate them in prose.
 3. Wait for the user. Do not advance to the next section automatically.
 4. If the user asks to leave a PR comment, emit one ` ```acp-comment-draft ` block. The host shows a preview and asks for explicit approval before posting.
+5. If the host says the user approved a comment draft, publish exactly that comment and emit one ` ```acp-comment-result ` block. Do not approve, merge, close, label, or otherwise change the PR as part of comment publishing.
 
 ## Non-negotiables
 
@@ -87,23 +88,34 @@ If a section has no actionable concerns, emit `"concerns": []`. If nothing impor
 
 `kind` is `inline` or `top_level`. `side` is `LEFT` or `RIGHT` (defaults to `RIGHT` for inline). For `top_level`, omit `file_path`, `line`, `side`.
 
-### ` ```acp-diff-focus ` (emit when you want the app to scroll to and highlight diff lines)
+### ` ```acp-comment-result ` (emit after trying to publish an approved comment)
+
+Success:
 
 ```json
 {
-  "file_path": "src/api/handlers.rs",
-  "start_line": 24,
-  "end_line": 31,
-  "side": "RIGHT",
-  "reason": "This is the validation branch I am explaining."
+  "draft_id": "draft-123",
+  "status": "published",
+  "url": "https://github.com/owner/repo/pull/123#discussion_r123"
 }
 ```
 
-`side` is `LEFT` for the old version and `RIGHT` for the new version. Use this when you need to point the user at lines in the rendered diff. Do not also paste the code into chat.
+Failure:
+
+```json
+{
+  "draft_id": "draft-123",
+  "status": "failed",
+  "error": "GitHub rejected the comment: line must be part of the diff"
+}
+```
+
+`status` is `published` or `failed`. Keep `error` short and useful.
 
 ## Reminders
 
 - Never paste diffs or file contents into your reply.
 - One ` ```acp-section ` per turn, never more.
 - Always include the leading section map before any section.
+- After publishing an approved comment, always emit ` ```acp-comment-result `.
 - The host writes nothing to the agent except user messages — be the source of truth for review state.

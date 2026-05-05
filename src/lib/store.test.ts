@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { ChatMessage } from "./types/section";
 
 const storage = new Map<string, string>();
 
@@ -174,53 +175,115 @@ test("appendAssistantChunk hides structured review fences from chat text", async
 	assert.equal(useApp.getState().chat[0]?.text, "Here is the map.\nReady.");
 });
 
-test("diff focus state stores active focus and pending references", async () => {
-	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
-
-	useApp.setState({
-		diffFocus: null,
-		pendingDiffReferences: [],
-		diffFocusError: null,
-	});
-
-	const focus = {
-		id: "focus-1",
-		file_path: "src/App.tsx",
-		start_line: 4,
-		end_line: 9,
-		side: "RIGHT" as const,
-		source: "user" as const,
-		mode: "draft-reference" as const,
-		created_at: 123,
-	};
-
-	useApp.getState().setDiffFocus(focus);
-	assert.deepEqual(useApp.getState().diffFocus, focus);
-
-	useApp.getState().addPendingDiffReference(focus);
-	assert.deepEqual(useApp.getState().pendingDiffReferences, [focus]);
-
-	useApp.getState().clearDiffFocus("focus-1");
-	assert.equal(useApp.getState().diffFocus, null);
-
-	useApp.getState().removePendingDiffReference("focus-1");
-	assert.deepEqual(useApp.getState().pendingDiffReferences, []);
-});
-
-test("appendAssistantChunk hides diff focus fences from chat text", async () => {
+test("structured review fences split around a readable item stay hidden", async () => {
 	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
 
 	useApp.setState({ chat: [], streaming: false });
 
 	useApp.getState().appendAssistantChunk(
 		[
-			"Look here.",
-			"```acp-diff-focus",
-			'{ "file_path": "src/App.tsx", "start_line": 4, "end_line": 9, "side": "RIGHT" }',
+			"A focused bug-fix PR.",
+			"",
+			"```acp-section-map",
+			"{",
+			'  "sections": [',
+			'    { "section_id": "query-rules", "title": "Query support rule changes", "intent": "Core logic" },',
+			'    { "section_id": "changeset", "title": "Changeset", "intent": "Release metadata',
+		].join("\n"),
+	);
+	useApp.getState().addSectionMapItem([
+		{
+			section_id: "query-rules",
+			title: "Query support rule changes",
+			intent: "Core logic",
+		},
+		{
+			section_id: "changeset",
+			title: "Changeset",
+			intent: "Release metadata for this patch",
+		},
+	]);
+	useApp.getState().appendAssistantChunk(
+		[
+			' for this patch" }',
+			"  ]",
+			"}",
 			"```",
-			"Then continue.",
+			"",
+			"Ready when you are.",
 		].join("\n"),
 	);
 
-	assert.equal(useApp.getState().chat[0]?.text, "Look here.\nThen continue.");
+	const chat = useApp.getState().chat as ChatMessage[];
+	assert.equal(chat.length, 3);
+	assert.equal(chat[0]?.text.trimEnd(), "A focused bug-fix PR.");
+	assert.equal(chat[1]?.item?.type, "section_map");
+	assert.equal(chat[2]?.text.trim(), "Ready when you are.");
+	assert(!chat.some((message) => message.text.includes("```acp-section-map")));
+	assert(!chat.some((message) => message.text.includes("Release metadata")));
+});
+
+test("applyCommentResult stores published URL for matching draft", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+
+	useApp.setState({
+		commentDrafts: [
+			{
+				id: "draft-123",
+				status: "publishing",
+				draft: {
+					kind: "top_level",
+					body: "Looks good.",
+				},
+			},
+		],
+	});
+
+	useApp.getState().applyCommentResult({
+		draft_id: "draft-123",
+		status: "published",
+		url: "https://github.com/garden-co/jazz/pull/787#discussion_r1",
+	});
+
+	assert.deepEqual(useApp.getState().commentDrafts[0], {
+		id: "draft-123",
+		status: "published",
+		url: "https://github.com/garden-co/jazz/pull/787#discussion_r1",
+		draft: {
+			kind: "top_level",
+			body: "Looks good.",
+		},
+	});
+});
+
+test("applyCommentResult stores failure message for matching draft", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+
+	useApp.setState({
+		commentDrafts: [
+			{
+				id: "draft-456",
+				status: "publishing",
+				draft: {
+					kind: "inline",
+					body: "Please check this.",
+					file_path: "src/main.rs",
+					line: 12,
+					side: "RIGHT",
+				},
+			},
+		],
+	});
+
+	useApp.getState().applyCommentResult({
+		draft_id: "draft-456",
+		status: "failed",
+		error: "GitHub rejected the comment.",
+	});
+
+	assert.equal(useApp.getState().commentDrafts[0]?.status, "error");
+	assert.equal(
+		useApp.getState().commentDrafts[0]?.error,
+		"GitHub rejected the comment.",
+	);
 });

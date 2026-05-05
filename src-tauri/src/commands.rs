@@ -1,12 +1,10 @@
 use crate::acp_client::{start_session, AcpSessions};
 use crate::agent_runner::{list_agents, AgentInfo, AgentKind};
-use crate::comments::{publish, PrTarget};
 use crate::projects::{self, RecentProject};
 use crate::repo::{
     get_diff, get_file_at_ref, inspect_origin, parse_pr_url, resolve_source, ClonedRepo, DiffPatch,
     GithubRepoInfo, SessionSource,
 };
-use crate::section::CommentDraft;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, State};
@@ -164,7 +162,7 @@ pub async fn record_recent_project_cmd(project: RecentProject) -> Result<(), Str
 }
 
 #[tauri::command]
-#[tracing::instrument(skip(sessions), fields(session_id = %session_id))]
+#[tracing::instrument(skip(sessions, text), fields(session_id = %session_id))]
 pub async fn send_message_cmd(
     sessions: State<'_, AcpSessions>,
     session_id: String,
@@ -172,6 +170,7 @@ pub async fn send_message_cmd(
     origin: Option<String>,
     reason: Option<String>,
     section_id: Option<String>,
+    suppress_preview: Option<bool>,
 ) -> Result<(), String> {
     let sess = sessions
         .get(&session_id)
@@ -182,6 +181,7 @@ pub async fn send_message_cmd(
         origin = origin.as_deref().unwrap_or("unknown"),
         reason = reason.as_deref().unwrap_or("unknown"),
         section_id = section_id.as_deref().unwrap_or(""),
+        suppress_preview = suppress_preview.unwrap_or(false),
         "user prompt",
     );
     sess.send_prompt(text, origin, reason, section_id)
@@ -234,20 +234,5 @@ pub async fn get_diff_cmd(args: GetDiffArgs) -> Result<Vec<DiffPatch>, String> {
     tokio::task::spawn_blocking(move || get_diff(&path, &base, &head, file.as_deref()))
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublishCommentArgs {
-    pub target: PrTarget,
-    pub draft: CommentDraft,
-    pub head_sha: String,
-}
-
-#[tauri::command]
-#[tracing::instrument(skip_all, fields(target = ?args.target, kind = ?args.draft.kind))]
-pub async fn publish_comment_cmd(args: PublishCommentArgs) -> Result<Option<String>, String> {
-    publish(&args.target, &args.draft, &args.head_sha)
-        .await
         .map_err(|e| e.to_string())
 }

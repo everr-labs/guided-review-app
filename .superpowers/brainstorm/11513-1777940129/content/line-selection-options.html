@@ -1,0 +1,173 @@
+<style>
+  .comparison-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+    margin-top: 18px;
+  }
+  .mock-diff {
+    border: 1px solid #273244;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #0d1117;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+  }
+  .mock-file {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-bottom: 1px solid #273244;
+    color: #c9d1d9;
+    background: #161b22;
+  }
+  .mock-line {
+    display: grid;
+    grid-template-columns: 46px 1fr;
+    min-height: 25px;
+    line-height: 25px;
+  }
+  .mock-num {
+    padding-right: 12px;
+    text-align: right;
+    color: #7d8590;
+    background: #161b22;
+    border-right: 1px solid #273244;
+    user-select: none;
+  }
+  .mock-code {
+    padding: 0 12px;
+    color: #d1d7e0;
+    white-space: nowrap;
+  }
+  .add .mock-code { background: rgba(46, 160, 67, 0.18); }
+  .del .mock-code { background: rgba(248, 81, 73, 0.18); }
+  .selected .mock-num {
+    color: white;
+    background: #1f6feb;
+  }
+  .selected .mock-code {
+    background: rgba(56, 139, 253, 0.22);
+    box-shadow: inset 3px 0 #1f6feb;
+  }
+  .mini-toolbar {
+    display: flex;
+    gap: 6px;
+    padding: 8px 10px;
+    border-top: 1px solid #273244;
+    background: #101722;
+  }
+  .mini-button {
+    border: 1px solid #3b485c;
+    border-radius: 6px;
+    padding: 5px 8px;
+    color: #f0f6fc;
+    background: #1f2937;
+    font: 600 11px system-ui;
+  }
+  .line-action {
+    display: inline-flex;
+    width: 18px;
+    height: 18px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    color: white;
+    background: #238636;
+    font-weight: 700;
+  }
+  .chat-chip {
+    margin-top: 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: #dbeafe;
+    background: rgba(30, 41, 59, 0.75);
+    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (max-width: 900px) {
+    .comparison-grid { grid-template-columns: 1fr; }
+  }
+</style>
+
+<h2>How should line quoting work?</h2>
+<p class="subtitle">The goal is to replace raw text selection with a clean GitHub-like line reference that the chat can understand.</p>
+
+<div class="cards comparison-grid">
+  <div class="card" data-choice="github-range" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mock-diff">
+        <div class="mock-file">
+          <span>src/lib/store.ts</span>
+          <span>Click line number, shift-click range</span>
+        </div>
+        <div class="mock-line">
+          <div class="mock-num">41</div>
+          <div class="mock-code">function appendStreamingText(current, next) {</div>
+        </div>
+        <div class="mock-line selected add">
+          <div class="mock-num">42</div>
+          <div class="mock-code">  const overlap = sharedBoundaryLength(current, next);</div>
+        </div>
+        <div class="mock-line selected add">
+          <div class="mock-num">43</div>
+          <div class="mock-code">  return current + next.slice(overlap);</div>
+        </div>
+        <div class="mock-line">
+          <div class="mock-num">44</div>
+          <div class="mock-code">}</div>
+        </div>
+        <div class="mini-toolbar">
+          <span class="mini-button">Quote lines 42-43</span>
+          <span class="mini-button">Clear</span>
+        </div>
+      </div>
+      <div class="chat-chip">src/lib/store.ts:42-43</div>
+    </div>
+    <div class="card-body">
+      <h3>Option A - GitHub-style range selection</h3>
+      <p>Click a line number to select it, shift-click another line to select a range, then add that exact range to chat.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="inline-plus" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mock-diff">
+        <div class="mock-file">
+          <span>src/lib/store.ts</span>
+          <span>Hover line, click +</span>
+        </div>
+        <div class="mock-line">
+          <div class="mock-num">41</div>
+          <div class="mock-code">function appendStreamingText(current, next) {</div>
+        </div>
+        <div class="mock-line add">
+          <div class="mock-num">42</div>
+          <div class="mock-code"><span class="line-action">+</span> const overlap = sharedBoundaryLength(current, next);</div>
+        </div>
+        <div class="mock-line add">
+          <div class="mock-num">43</div>
+          <div class="mock-code">  return current + next.slice(overlap);</div>
+        </div>
+        <div class="mock-line">
+          <div class="mock-num">44</div>
+          <div class="mock-code">}</div>
+        </div>
+        <div class="mini-toolbar">
+          <span class="mini-button">Add line 42</span>
+          <span class="mini-button">Add range...</span>
+        </div>
+      </div>
+      <div class="chat-chip">src/lib/store.ts:42</div>
+    </div>
+    <div class="card-body">
+      <h3>Option B - Inline quote button</h3>
+      <p>Hover a line and click a small plus/quote action. This is more obvious, but less like GitHub’s range-selection flow.</p>
+    </div>
+  </div>
+</div>

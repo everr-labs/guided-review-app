@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Git tag to create or reuse. Leave empty to use guided-review-v__VERSION__."
+        required: false
+        type: string
+      release_name:
+        description: "Release title. Leave empty to use Guided Review v__VERSION__."
+        required: false
+        type: string
+      draft:
+        description: "Create the GitHub Release as a draft."
+        required: true
+        default: false
+        type: boolean
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease."
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release-macos:
+    name: Build signed macOS app
+    runs-on: macos-latest
+    env:
+      CI: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Check TypeScript
+        run: npm run check
+
+      - name: Resolve release metadata
+        run: |
+          tag_name="${{ inputs.tag_name }}"
+          release_name="${{ inputs.release_name }}"
+
+          if [ -z "$tag_name" ]; then
+            tag_name="guided-review-v__VERSION__"
+          fi
+
+          if [ -z "$release_name" ]; then
+            release_name="Guided Review v__VERSION__"
+          fi
+
+          echo "RELEASE_TAG=$tag_name" >> "$GITHUB_ENV"
+          echo "RELEASE_NAME=$release_name" >> "$GITHUB_ENV"
+
+      - name: Check Apple signing secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required for signing and notarization."
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Configure signing identity
+        env:
+          APPLE_SIGNING_IDENTITY_SECRET: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -n "$APPLE_SIGNING_IDENTITY_SECRET" ]; then
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY_SECRET" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build, sign, notarize, and upload app
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tauriScript: npm run tauri --
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: ${{ env.RELEASE_NAME }}
+          releaseBody: "Signed and notarized macOS build. Download the app from the assets below."
+          releaseDraft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          releaseCommitish: ${{ github.sha }}
+          args: --target universal-apple-darwin
