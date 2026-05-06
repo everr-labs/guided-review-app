@@ -2,8 +2,8 @@ use crate::acp_client::{start_session, AcpSessions};
 use crate::agent_runner::{list_agents, AgentInfo, AgentKind};
 use crate::projects::{self, RecentProject};
 use crate::repo::{
-    get_diff, get_file_at_ref, inspect_origin, parse_pr_url, resolve_source, ClonedRepo, DiffPatch,
-    GithubRepoInfo, SessionSource,
+    fetch_pull_request_metadata, get_diff, get_file_at_ref, inspect_origin, parse_pr_url,
+    resolve_source, ClonedRepo, DiffPatch, GithubRepoInfo, PullRequestMetadata, SessionSource,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -21,6 +21,8 @@ pub struct StartSessionResponse {
     pub session_id: String,
     pub repo: ClonedRepo,
     pub source: SessionSource,
+    pub pull_request: Option<PullRequestMetadata>,
+    pub pull_request_error: Option<String>,
 }
 
 const AGENT_SKILL: &str = include_str!("../../agent-skill.md");
@@ -54,6 +56,8 @@ pub async fn start_session_cmd(
                 e.to_string()
             })?;
         tracing::info!(repo = %cloned.display_slug, head = %cloned.head_ref, base = %cloned.base_ref, "repo ready");
+
+        let (pull_request, pull_request_error) = pull_request_metadata_for_source(&req.source).await;
 
         let session = start_session(app, req.agent_kind, cloned.path.clone())
             .await
@@ -108,10 +112,35 @@ pub async fn start_session_cmd(
             session_id,
             repo: cloned,
             source: req.source,
+            pull_request,
+            pull_request_error,
         })
     }
     .instrument(span)
     .await
+}
+
+async fn pull_request_metadata_for_source(
+    source: &SessionSource,
+) -> (Option<PullRequestMetadata>, Option<String>) {
+    let target = match source {
+        SessionSource::Pr { repo_url, number }
+        | SessionSource::LocalPr {
+            repo_url, number, ..
+        } => Some((repo_url, *number)),
+        _ => None,
+    };
+    let Some((repo_url, number)) = target else {
+        return (None, None);
+    };
+    match fetch_pull_request_metadata(repo_url, number).await {
+        Ok(metadata) => (Some(metadata), None),
+        Err(e) => {
+            let message = e.to_string();
+            tracing::warn!(error = %message, "PR metadata unavailable");
+            (None, Some(message))
+        }
+    }
 }
 
 fn parse_owner_repo(url: &str) -> (String, String) {

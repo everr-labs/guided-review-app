@@ -32,6 +32,20 @@ pub struct GithubRepoInfo {
     pub slug: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PullRequestMetadata {
+    pub title: String,
+    pub body: String,
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPullRequestMetadata {
+    title: String,
+    body: Option<String>,
+    url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionSource {
@@ -295,13 +309,13 @@ async fn resolve_default_branch(path: &Path) -> Result<String> {
 
 pub fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
     let parsed = Url::parse(url).ok()?;
-    if !matches!(parsed.host_str(), Some("github.com") | Some("www.github.com")) {
+    if !matches!(
+        parsed.host_str(),
+        Some("github.com") | Some("www.github.com")
+    ) {
         return None;
     }
-    let segs: Vec<&str> = parsed
-        .path_segments()?
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segs: Vec<&str> = parsed.path_segments()?.filter(|s| !s.is_empty()).collect();
     if segs.len() >= 4 && segs[2] == "pull" {
         let number: u64 = segs[3].parse().ok()?;
         return Some((segs[0].to_string(), segs[1].to_string(), number));
@@ -331,7 +345,10 @@ pub fn parse_github_repo_url(remote: &str) -> Option<GithubRepoInfo> {
         rest.to_string()
     } else {
         let parsed = Url::parse(trimmed).ok()?;
-        if !matches!(parsed.host_str(), Some("github.com") | Some("www.github.com")) {
+        if !matches!(
+            parsed.host_str(),
+            Some("github.com") | Some("www.github.com")
+        ) {
             return None;
         }
         parsed.path().trim_start_matches('/').to_string()
@@ -351,6 +368,51 @@ pub fn parse_github_repo_url(remote: &str) -> Option<GithubRepoInfo> {
         repo,
         slug,
     })
+}
+
+pub fn gh_pr_view_args(owner: &str, repo: &str, number: u64) -> Vec<String> {
+    vec![
+        "pr".to_string(),
+        "view".to_string(),
+        number.to_string(),
+        "--repo".to_string(),
+        format!("{owner}/{repo}"),
+        "--json".to_string(),
+        "title,body,url".to_string(),
+    ]
+}
+
+pub fn parse_pull_request_metadata_json(raw: &str) -> Result<PullRequestMetadata> {
+    let gh: GhPullRequestMetadata = serde_json::from_str(raw)?;
+    Ok(PullRequestMetadata {
+        title: gh.title,
+        body: gh.body.unwrap_or_default(),
+        url: gh.url,
+    })
+}
+
+pub async fn fetch_pull_request_metadata(
+    repo_url: &str,
+    number: u64,
+) -> Result<PullRequestMetadata> {
+    let repo = parse_github_repo_url(repo_url)
+        .ok_or_else(|| anyhow!("PR metadata requires a GitHub repository URL"))?;
+    let args = gh_pr_view_args(&repo.owner, &repo.repo, number);
+    let out = Command::new("gh")
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("running gh {args:?}"))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "gh pr view failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    parse_pull_request_metadata_json(&String::from_utf8_lossy(&out.stdout))
 }
 
 async fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<()> {
@@ -417,14 +479,8 @@ pub fn get_diff(
     file_path: Option<&str>,
 ) -> Result<Vec<DiffPatch>> {
     let repo = Repository::open(repo_path)?;
-    let base_tree = repo
-        .revparse_single(base_ref)?
-        .peel_to_commit()?
-        .tree()?;
-    let head_tree = repo
-        .revparse_single(head_ref)?
-        .peel_to_commit()?
-        .tree()?;
+    let base_tree = repo.revparse_single(base_ref)?.peel_to_commit()?.tree()?;
+    let head_tree = repo.revparse_single(head_ref)?.peel_to_commit()?.tree()?;
 
     let mut opts = DiffOptions::new();
     if let Some(p) = file_path {
@@ -457,7 +513,8 @@ pub fn get_diff(
                 if matches!(origin, ' ' | '+' | '-') {
                     last.patch.push(origin);
                 }
-                last.patch.push_str(&String::from_utf8_lossy(line.content()));
+                last.patch
+                    .push_str(&String::from_utf8_lossy(line.content()));
             }
             true
         }),
@@ -534,6 +591,38 @@ mod tests {
     fn parse_github_repo_url_rejects_non_github_remotes() {
         assert!(parse_github_repo_url("https://gitlab.com/openai/codex").is_none());
         assert!(parse_github_repo_url("not-a-url").is_none());
+    }
+
+    #[test]
+    fn parse_pull_request_metadata_json_reads_gh_pr_view_output() {
+        let metadata = parse_pull_request_metadata_json(
+            r###"{
+                "title": "Improve guided review",
+                "body": "## Summary\nMake review easier.",
+                "url": "https://github.com/openai/codex/pull/123"
+            }"###,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.title, "Improve guided review");
+        assert_eq!(metadata.body, "## Summary\nMake review easier.");
+        assert_eq!(metadata.url, "https://github.com/openai/codex/pull/123");
+    }
+
+    #[test]
+    fn gh_pr_view_args_target_the_expected_repo_and_fields() {
+        assert_eq!(
+            gh_pr_view_args("openai", "codex", 123),
+            vec![
+                "pr",
+                "view",
+                "123",
+                "--repo",
+                "openai/codex",
+                "--json",
+                "title,body,url",
+            ]
+        );
     }
 
     #[tokio::test]

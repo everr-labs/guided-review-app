@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChatMessage } from "./types/section";
+import type { LocalProject } from "./projectSource";
+import type { SectionState } from "./store";
 
 const storage = new Map<string, string>();
 
@@ -20,6 +22,171 @@ globalThis.localStorage = {
 		return storage.size;
 	},
 } as Storage;
+
+const repo = {
+	path: "/Users/guidodorsi/dev/codex",
+	head_ref: "guided-review-pr-123",
+	head_sha: "abc123",
+	base_ref: "origin/main",
+	display_slug: "codex",
+};
+
+const prSession = {
+	session_id: "session-123",
+	repo,
+	source: {
+		kind: "local_pr" as const,
+		path: "/Users/guidodorsi/dev/codex",
+		repo_url: "https://github.com/openai/codex",
+		number: 123,
+	},
+	pull_request: {
+		title: "Improve guided review",
+		body: "## Summary\n\nMake the review easier to follow.",
+		url: "https://github.com/openai/codex/pull/123",
+	},
+};
+
+async function resetReviewState() {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	useApp.setState({
+		session: null,
+		sections: [],
+		currentSectionId: null,
+		processingSectionId: null,
+		chat: [],
+		commentDrafts: [],
+		streaming: false,
+		errors: [],
+		stderr: [],
+		structuredReviewBlockOpen: false,
+	});
+}
+
+test("setSession creates and selects the PR description section when metadata is available", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+
+	const [section] = useApp.getState().sections;
+	assert.equal(section?.kind, "pr_description");
+	assert.equal(section?.id, "pr-description");
+	assert.equal(section?.title, "PR description");
+	assert.equal(section?.intent, "Improve guided review");
+	assert.equal(section?.status, "in_review");
+	assert.equal(
+		section?.kind === "pr_description" ? section.body : "",
+		"## Summary\n\nMake the review easier to follow.",
+	);
+	assert.equal(useApp.getState().currentSectionId, "pr-description");
+});
+
+test("setSectionMap keeps PR description first and appends agent sections", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "overview",
+			title: "Overview",
+			intent: "Understand the change",
+		},
+		{
+			section_id: "tests",
+			title: "Tests",
+			intent: "Check coverage",
+		},
+	]);
+
+	assert.deepEqual(
+		useApp
+			.getState()
+			.sections.map((section: SectionState) => section.id),
+		["pr-description", "overview", "tests"],
+	);
+	assert.equal(useApp.getState().sections[0]?.kind, "pr_description");
+	assert.equal(useApp.getState().currentSectionId, "pr-description");
+});
+
+test("auto-opening the first review section keeps PR description selected", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "overview",
+			title: "Overview",
+			intent: "Understand the change",
+		},
+	]);
+	useApp.getState().startSectionProcessing("overview");
+
+	assert.equal(useApp.getState().currentSectionId, "pr-description");
+	assert.equal(useApp.getState().processingSectionId, "overview");
+});
+
+test("upsertSection keeps PR description selected while first real section loads", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "overview",
+			title: "Overview",
+			intent: "Understand the change",
+		},
+	]);
+	useApp.getState().startSectionProcessing("overview");
+	useApp.getState().upsertSection({
+		schema_version: 1,
+		section_id: "overview",
+		title: "Overview",
+		intent: "Understand the change",
+		files: [],
+		ranges: [],
+		concerns: [],
+		uncovered_scenarios: [],
+		test_coverage_notes: "",
+		base_ref: "base",
+		head_ref: "head",
+		pause_prompt: "",
+	});
+
+	assert.equal(useApp.getState().currentSectionId, "pr-description");
+	assert.equal(useApp.getState().processingSectionId, null);
+	assert.equal(useApp.getState().sections[1]?.kind, "review_section");
+	assert.equal(useApp.getState().sections[1]?.status, "in_review");
+});
+
+test("setProject saves and clears the last selected project path", async () => {
+	const { LAST_PROJECT_PATH_KEY } = await import(
+		new URL("./projectSource.ts", import.meta.url).href
+	);
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	const project: LocalProject = {
+		path: "/Users/guidodorsi/dev/codex",
+		origin: {
+			repo_url: "https://github.com/openai/codex",
+			owner: "openai",
+			repo: "codex",
+			slug: "openai/codex",
+		},
+	};
+	storage.clear();
+	await resetReviewState();
+
+	useApp.getState().setProject(project);
+
+	assert.equal(storage.get(LAST_PROJECT_PATH_KEY), project.path);
+
+	useApp.getState().setProject(null);
+
+	assert.equal(storage.get(LAST_PROJECT_PATH_KEY), undefined);
+});
 
 test("appendAssistantChunk merges overlapping text chunks", async () => {
 	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
@@ -60,6 +227,7 @@ test("section processing state clears when the requested section arrives", async
 		sections: [
 			{
 				id: "metadata-retention-logic",
+				kind: "review_section",
 				title: "Metadata retention decision logic",
 				intent: "Review metadata behavior",
 				status: "pending",

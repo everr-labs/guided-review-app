@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ChevronDown, FolderOpen, GitPullRequest } from "lucide-react";
@@ -16,6 +16,8 @@ import { acp } from "@/lib/acp";
 import { cn } from "@/lib/utils";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
 import {
+	clearLastProjectPath,
+	loadLastProjectPath,
 	localRecentProjects,
 	type LocalProject,
 	type LocalRecentProject,
@@ -38,6 +40,7 @@ export function ProjectPicker() {
 	const [recents, setRecents] = useState<LocalRecentProject[]>([]);
 	const [loadingPath, setLoadingPath] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	const attemptedRestoreRef = useRef(false);
 
 	useEffect(() => {
 		(async () => {
@@ -62,31 +65,46 @@ export function ProjectPicker() {
 		});
 	}, [query, recents]);
 
-	async function selectProjectPath(path: string) {
-		setError(null);
-		setLoadingPath(path);
-		recordClientTelemetry("client.project.select.requested", {
-			"project.path": path,
-		});
-		try {
-			const origin = await acp.inspectLocalRepoOrigin(path);
-			const next: LocalProject = { path, origin };
-			setProject(next);
-			recordClientTelemetry("client.project.select.succeeded", {
+	const selectProjectPath = useCallback(
+		async (path: string, source: "user" | "restore" = "user") => {
+			setError(null);
+			setLoadingPath(path);
+			recordClientTelemetry("client.project.select.requested", {
 				"project.path": path,
-				"project.slug": origin.slug,
+				"project.selection_source": source,
 			});
-			setOpen(false);
-			setQuery("");
-		} catch (e) {
-			recordClientTelemetryError("client.project.select.failed", e, {
-				"project.path": path,
-			});
-			setError(String(e));
-		} finally {
-			setLoadingPath(null);
-		}
-	}
+			try {
+				const origin = await acp.inspectLocalRepoOrigin(path);
+				const next: LocalProject = { path, origin };
+				setProject(next);
+				recordClientTelemetry("client.project.select.succeeded", {
+					"project.path": path,
+					"project.slug": origin.slug,
+					"project.selection_source": source,
+				});
+				setOpen(false);
+				setQuery("");
+			} catch (e) {
+				recordClientTelemetryError("client.project.select.failed", e, {
+					"project.path": path,
+					"project.selection_source": source,
+				});
+				if (source === "restore") clearLastProjectPath();
+				else setError(String(e));
+			} finally {
+				setLoadingPath(null);
+			}
+		},
+		[setProject],
+	);
+
+	useEffect(() => {
+		if (attemptedRestoreRef.current || project) return;
+		attemptedRestoreRef.current = true;
+		const savedPath = loadLastProjectPath();
+		if (!savedPath) return;
+		void selectProjectPath(savedPath, "restore");
+	}, [project, selectProjectPath]);
 
 	async function pickLocal() {
 		try {

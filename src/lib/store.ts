@@ -9,23 +9,41 @@ import type {
 	SectionStatus,
 	ToolCallItem,
 } from "./types/section";
-import type { ClonedRepo, SessionSource } from "./acp";
+import type { ClonedRepo, PullRequestMetadata, SessionSource } from "./acp";
 import type { LocalProject } from "./projectSource";
+import { clearLastProjectPath, saveLastProjectPath } from "./projectSource";
 import { recordClientTelemetry, truncateTelemetryText } from "./telemetry";
 
 export interface SessionInfo {
 	session_id: string;
 	repo: ClonedRepo;
 	source: SessionSource;
+	pull_request?: PullRequestMetadata;
+	pull_request_error?: string;
 }
 
-export interface SectionState {
+export const PR_DESCRIPTION_SECTION_ID = "pr-description";
+
+interface BaseSectionState {
 	id: string;
 	title: string;
 	intent: string;
 	status: SectionStatus;
+}
+
+export interface PrDescriptionSectionState extends BaseSectionState {
+	kind: "pr_description";
+	body: string;
+	url?: string;
+	error?: string;
+}
+
+export interface ReviewSectionState extends BaseSectionState {
+	kind: "review_section";
 	section?: ReviewSection;
 }
+
+export type SectionState = PrDescriptionSectionState | ReviewSectionState;
 
 export interface CommentDraftState {
 	id: string;
@@ -95,6 +113,25 @@ function loadBool(key: string, fallback: boolean): boolean {
 	} catch {
 		return fallback;
 	}
+}
+
+function prDescriptionFromSession(
+	session: SessionInfo | null,
+): PrDescriptionSectionState | null {
+	if (!session?.pull_request && !session?.pull_request_error) return null;
+	const pr = session.pull_request;
+	return {
+		id: PR_DESCRIPTION_SECTION_ID,
+		kind: "pr_description",
+		title: "PR description",
+		intent: pr?.title || "PR description unavailable",
+		status: "in_review",
+		body: pr
+			? pr.body.trim() || "No PR description was provided."
+			: "PR description unavailable.",
+		url: pr?.url,
+		error: session.pull_request_error,
+	};
 }
 
 interface AppendStreamingTextResult {
@@ -244,6 +281,8 @@ export const useApp = create<AppState>((set) => ({
 	setProject: (p) =>
 		set((state) => {
 			const samePath = state.project?.path === p?.path;
+			if (p) saveLastProjectPath(p.path);
+			else clearLastProjectPath();
 			recordClientTelemetry("client.store.project.set", {
 				"project.path": p?.path,
 				"project.slug": p?.origin.slug,
@@ -273,8 +312,15 @@ export const useApp = create<AppState>((set) => ({
 			"repo.base_ref": s?.repo.base_ref,
 			"repo.head_ref": s?.repo.head_ref,
 			"session.source.kind": s?.source.kind,
+			"pull_request.has_metadata": !!s?.pull_request,
+			"pull_request.has_error": !!s?.pull_request_error,
 		});
-		set({ session: s });
+		const prDescription = prDescriptionFromSession(s);
+		set({
+			session: s,
+			sections: prDescription ? [prDescription] : [],
+			currentSectionId: prDescription ? prDescription.id : null,
+		});
 	},
 	reset: () =>
 		set((state) => {
@@ -305,13 +351,23 @@ export const useApp = create<AppState>((set) => ({
 				"section.previous_current_id": state.currentSectionId,
 				"section.previous_count": state.sections.length,
 			});
+			const prDescription = state.sections.find(
+				(section): section is PrDescriptionSectionState =>
+					section.kind === "pr_description",
+			);
 			return {
-				sections: entries.map((e) => ({
-					id: e.section_id,
-					title: e.title,
-					intent: e.intent,
-					status: "pending",
-				})),
+				sections: [
+					...(prDescription ? [prDescription] : []),
+					...entries.map(
+						(e): ReviewSectionState => ({
+							id: e.section_id,
+							kind: "review_section",
+							title: e.title,
+							intent: e.intent,
+							status: "pending",
+						}),
+					),
+				],
 			};
 		}),
 
@@ -321,8 +377,9 @@ export const useApp = create<AppState>((set) => ({
 			const idx = sections.findIndex((s) => s.id === section.section_id);
 			const previousCurrentId = state.currentSectionId;
 			const previousStatus = idx >= 0 ? sections[idx].status : undefined;
-			const updated: SectionState = {
+			const updated: ReviewSectionState = {
 				id: section.section_id,
+				kind: "review_section",
 				title: section.title,
 				intent: section.intent,
 				status: "in_review",
@@ -330,6 +387,10 @@ export const useApp = create<AppState>((set) => ({
 			};
 			if (idx >= 0) sections[idx] = updated;
 			else sections.push(updated);
+			const nextCurrentId =
+				state.currentSectionId === PR_DESCRIPTION_SECTION_ID
+					? state.currentSectionId
+					: section.section_id;
 			recordClientTelemetry("client.store.section.upserted", {
 				"acp.session_id": state.session?.session_id,
 				"section.id": section.section_id,
@@ -337,14 +398,14 @@ export const useApp = create<AppState>((set) => ({
 				"section.was_known": idx >= 0,
 				"section.previous_status": previousStatus,
 				"section.previous_current_id": previousCurrentId,
-				"section.next_current_id": section.section_id,
+				"section.next_current_id": nextCurrentId,
 				"section.processing_id": state.processingSectionId,
 				"section.file_count": section.files.length,
 				"section.range_count": section.ranges.length,
 			});
 			return {
 				sections,
-				currentSectionId: section.section_id,
+				currentSectionId: nextCurrentId,
 				processingSectionId:
 					state.processingSectionId === section.section_id
 						? null
@@ -384,7 +445,13 @@ export const useApp = create<AppState>((set) => ({
 				"section.previous_processing_id": state.processingSectionId,
 				"section.next_processing_id": id,
 			});
-			return { currentSectionId: id, processingSectionId: id };
+			return {
+				currentSectionId:
+					state.currentSectionId === PR_DESCRIPTION_SECTION_ID
+						? state.currentSectionId
+						: id,
+				processingSectionId: id,
+			};
 		}),
 
 	finishSectionProcessing: (id = null) =>

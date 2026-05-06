@@ -36,10 +36,18 @@ export interface ClonedRepo {
 	display_slug: string;
 }
 
+export interface PullRequestMetadata {
+	title: string;
+	body: string;
+	url: string;
+}
+
 export interface StartSessionResponse {
 	session_id: string;
 	repo: ClonedRepo;
 	source: SessionSource;
+	pull_request?: PullRequestMetadata;
+	pull_request_error?: string;
 }
 
 export interface DiffPatch {
@@ -205,6 +213,8 @@ export const acp = {
 				"repo.display_slug": response.repo.display_slug,
 				"repo.base_ref": response.repo.base_ref,
 				"repo.head_ref": response.repo.head_ref,
+				"pull_request.has_metadata": !!response.pull_request,
+				"pull_request.has_error": !!response.pull_request_error,
 			});
 			return response;
 		} catch (e) {

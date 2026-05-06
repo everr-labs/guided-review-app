@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	LAST_PROJECT_PATH_KEY,
+	loadLastProjectPath,
 	localRecentProjects,
 	localReviewSourceFromInput,
 	parsePrInput,
+	saveLastProjectPath,
 	type LocalProject,
 	type LocalRepoOrigin,
 } from "./projectSource";
@@ -20,6 +23,26 @@ const project: LocalProject = {
 	path: "/Users/guidodorsi/dev/codex",
 	origin,
 };
+
+function createMemoryStorage(seed: Record<string, string> = {}): Storage {
+	const values = new Map(Object.entries(seed));
+	return {
+		getItem: (key: string) => values.get(key) ?? null,
+		setItem: (key: string, value: string) => {
+			values.set(key, value);
+		},
+		removeItem: (key: string) => {
+			values.delete(key);
+		},
+		clear: () => {
+			values.clear();
+		},
+		key: (index: number) => Array.from(values.keys())[index] ?? null,
+		get length() {
+			return values.size;
+		},
+	} as Storage;
+}
 
 test("parsePrInput accepts a plain PR number", () => {
 	assert.deepEqual(parsePrInput(" 123 "), {
@@ -173,4 +196,29 @@ test("localRecentProjects keeps only local recent projects", () => {
 			last_opened: 2,
 		},
 	]);
+});
+
+test("last project helpers load a saved path from storage", () => {
+	const storage = createMemoryStorage();
+
+	saveLastProjectPath("/Users/guidodorsi/dev/codex", storage);
+
+	assert.equal(
+		storage.getItem(LAST_PROJECT_PATH_KEY),
+		"/Users/guidodorsi/dev/codex",
+	);
+	assert.equal(
+		loadLastProjectPath(storage),
+		"/Users/guidodorsi/dev/codex",
+	);
+});
+
+test("last project helpers return null for missing or blank paths", () => {
+	assert.equal(loadLastProjectPath(createMemoryStorage()), null);
+	assert.equal(
+		loadLastProjectPath(
+			createMemoryStorage({ [LAST_PROJECT_PATH_KEY]: "   " }),
+		),
+		null,
+	);
 });

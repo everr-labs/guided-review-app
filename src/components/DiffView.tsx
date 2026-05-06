@@ -104,7 +104,8 @@ export function DiffPane() {
 		() => sections.find((s) => s.id === currentId) ?? null,
 		[sections, currentId],
 	);
-	const section = current?.section ?? null;
+	const section =
+		current?.kind === "review_section" ? current.section ?? null : null;
 
 	const [bundles, setBundles] = useState<FileBundle[]>([]);
 	const [loading, setLoading] = useState(false);
@@ -192,6 +193,39 @@ export function DiffPane() {
 		return (
 			<section className="flex min-h-0 flex-col items-center justify-center text-sm text-muted-foreground">
 				<p>Start a session to see the guided review.</p>
+			</section>
+		);
+	}
+
+	if (current.kind === "pr_description") {
+		return (
+			<section className="flex min-h-0 flex-col overflow-y-auto">
+				<header className="border-b border-border bg-card/40 px-6 py-4">
+					<h2 className="text-base font-semibold">{current.title}</h2>
+					<p className="mt-1 text-sm text-muted-foreground">
+						{current.intent}
+					</p>
+					{current.url && (
+						<a
+							href={current.url}
+							target="_blank"
+							rel="noreferrer"
+							className="mt-2 block truncate font-mono text-[11px] text-primary hover:underline"
+						>
+							{current.url}
+						</a>
+					)}
+				</header>
+				<div className="p-6">
+					{current.error && (
+						<div className="mb-4 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive-foreground">
+							{current.error}
+						</div>
+					)}
+					<div className="whitespace-pre-wrap rounded-md border border-border bg-card/40 px-4 py-3 text-sm leading-relaxed">
+						{current.body}
+					</div>
+				</div>
 			</section>
 		);
 	}

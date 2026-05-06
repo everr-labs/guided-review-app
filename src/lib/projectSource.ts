@@ -25,6 +25,34 @@ export interface LocalProject {
 type Result<T> = { value: T } | { error: string };
 type SourceResult = { source: SessionSource } | { error: string };
 
+export const LAST_PROJECT_PATH_KEY = "gr.lastProjectPath";
+
+export function loadLastProjectPath(storage: Storage = localStorage): string | null {
+	try {
+		const path = storage.getItem(LAST_PROJECT_PATH_KEY)?.trim() ?? "";
+		return path ? path : null;
+	} catch {
+		return null;
+	}
+}
+
+export function saveLastProjectPath(
+	path: string,
+	storage: Storage = localStorage,
+): void {
+	const trimmed = path.trim();
+	if (!trimmed) return;
+	try {
+		storage.setItem(LAST_PROJECT_PATH_KEY, trimmed);
+	} catch {}
+}
+
+export function clearLastProjectPath(storage: Storage = localStorage): void {
+	try {
+		storage.removeItem(LAST_PROJECT_PATH_KEY);
+	} catch {}
+}
+
 function normalizeSlug(owner: string, repo: string): string {
 	return `${owner}/${repo}`.toLowerCase();
 }
