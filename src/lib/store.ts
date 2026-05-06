@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
 	ChatItem,
 	ChatMessage,
+	ChatMessagePart,
 	CommentDraft,
 	CommentResult,
 	ReviewSection,
@@ -9,7 +10,13 @@ import type {
 	SectionStatus,
 	ToolCallItem,
 } from "./types/section";
-import type { ClonedRepo, PullRequestMetadata, SessionSource } from "./acp";
+import type {
+	ClonedRepo,
+	PendingReview,
+	PublishedPrComment,
+	PullRequestMetadata,
+	SessionSource,
+} from "./acp";
 import type { LocalProject } from "./projectSource";
 import { clearLastProjectPath, saveLastProjectPath } from "./projectSource";
 import type { DiffFocusRange } from "./diffFocus";
@@ -21,6 +28,8 @@ export interface SessionInfo {
 	source: SessionSource;
 	pull_request?: PullRequestMetadata;
 	pull_request_error?: string;
+	published_comments?: PublishedPrComment[];
+	published_comments_error?: string;
 }
 
 export const PR_DESCRIPTION_SECTION_ID = "pr-description";
@@ -49,7 +58,17 @@ export type SectionState = PrDescriptionSectionState | ReviewSectionState;
 export interface CommentDraftState {
 	id: string;
 	draft: CommentDraft;
-	status: "pending" | "publishing" | "published" | "rejected" | "error";
+	status:
+		| "pending"
+		| "adding_to_review"
+		| "pending_review"
+		| "submitting"
+		| "publishing"
+		| "published"
+		| "rejected"
+		| "error";
+	pending_review_id?: number;
+	pending_review_node_id?: string;
 	url?: string;
 	error?: string;
 }
@@ -67,6 +86,10 @@ interface AppState {
 	processingSectionId: string | null;
 	chat: ChatMessage[];
 	commentDrafts: CommentDraftState[];
+	pendingReview: PendingReview | null;
+	publishedComments: PublishedPrComment[];
+	publishedCommentsFetchedAt: number | null;
+	publishedCommentsError: string | null;
 	streaming: boolean;
 	errors: string[];
 	stderr: string[];
@@ -96,6 +119,10 @@ interface AppState {
 
 	addCommentDraft: (id: string, draft: CommentDraft) => void;
 	updateCommentDraft: (id: string, patch: Partial<CommentDraftState>) => void;
+	dismissCommentDraft: (id: string) => void;
+	setPendingReview: (review: PendingReview | null) => void;
+	clearPendingReview: () => void;
+	markPendingReviewSubmitted: (reviewId: number) => void;
 	applyCommentResult: (result: CommentResult) => void;
 
 	pushError: (e: string) => void;
@@ -266,6 +293,37 @@ function finishStreamingMessages(chat: ChatMessage[]): ChatMessage[] {
 	return changed ? next : chat;
 }
 
+function partsFromMessage(message: ChatMessage): ChatMessagePart[] {
+	if (message.parts) return [...message.parts];
+	return message.text ? [{ type: "markdown", text: message.text }] : [];
+}
+
+function textFromParts(parts: ChatMessagePart[]): string {
+	return parts
+		.filter((part): part is Extract<ChatMessagePart, { type: "markdown" }> =>
+			part.type === "markdown"
+		)
+		.map((part) => part.text)
+		.join("");
+}
+
+function updateToolCallPart(
+	part: ChatMessagePart,
+	id: string,
+	status: string,
+): ChatMessagePart {
+	if (part.type !== "tool_call" || part.toolCall.tool_call_id !== id) {
+		return part;
+	}
+	return {
+		type: "tool_call",
+		toolCall: {
+			...part.toolCall,
+			status,
+		},
+	};
+}
+
 function readableAssistantMessage(item: ChatItem): ChatMessage {
 	return {
 		id: crypto.randomUUID(),
@@ -283,6 +341,10 @@ export const useApp = create<AppState>((set) => ({
 	processingSectionId: null,
 	chat: [],
 	commentDrafts: [],
+	pendingReview: null,
+	publishedComments: [],
+	publishedCommentsFetchedAt: null,
+	publishedCommentsError: null,
 	streaming: false,
 	errors: [],
 	stderr: [],
@@ -314,6 +376,10 @@ export const useApp = create<AppState>((set) => ({
 				processingSectionId: null,
 				chat: [],
 				commentDrafts: [],
+				pendingReview: null,
+				publishedComments: [],
+				publishedCommentsFetchedAt: null,
+				publishedCommentsError: null,
 				streaming: false,
 				structuredReviewBlockOpen: false,
 				diffFocus: null,
@@ -337,6 +403,12 @@ export const useApp = create<AppState>((set) => ({
 			session: s,
 			sections: prDescription ? [prDescription] : [],
 			currentSectionId: prDescription ? prDescription.id : null,
+			commentDrafts: [],
+			pendingReview: null,
+			publishedComments: s?.published_comments ?? [],
+			publishedCommentsFetchedAt: s ? Date.now() : null,
+			publishedCommentsError: s?.published_comments_error ?? null,
+			pendingDiffReferences: [],
 		});
 	},
 	reset: () =>
@@ -354,6 +426,10 @@ export const useApp = create<AppState>((set) => ({
 				processingSectionId: null,
 				chat: [],
 				commentDrafts: [],
+				pendingReview: null,
+				publishedComments: [],
+				publishedCommentsFetchedAt: null,
+				publishedCommentsError: null,
 				streaming: false,
 				structuredReviewBlockOpen: false,
 				diffFocus: null,
@@ -511,8 +587,21 @@ export const useApp = create<AppState>((set) => ({
 				};
 			}
 			if (last && last.role === "assistant" && last.streaming) {
+				const parts = partsFromMessage(last);
+				const lastPart = parts[parts.length - 1];
 				const merged = appendStreamingText(last.text, visibleText);
 				const nextText = cleanVisibleStructuredText(merged.text);
+				const nextSuffix = nextText.startsWith(last.text)
+					? nextText.slice(last.text.length)
+					: visibleText;
+				if (lastPart?.type === "markdown" && nextSuffix) {
+					parts[parts.length - 1] = {
+						type: "markdown",
+						text: cleanVisibleStructuredText(lastPart.text + nextSuffix),
+					};
+				} else if (nextSuffix) {
+					parts.push({ type: "markdown", text: nextSuffix });
+				}
 				recordClientTelemetry("client.chat.assistant_chunk.merged", {
 					"acp.session_id": sessionId,
 					"acp.message_id": meta?.messageId,
@@ -528,6 +617,7 @@ export const useApp = create<AppState>((set) => ({
 				chat[chat.length - 1] = {
 					...last,
 					text: nextText,
+					parts,
 				};
 			} else {
 				if (!visibleText) {
@@ -546,6 +636,7 @@ export const useApp = create<AppState>((set) => ({
 					id: crypto.randomUUID(),
 					role: "assistant",
 					text: visibleText,
+					parts: [{ type: "markdown", text: visibleText }],
 					streaming: true,
 				});
 			}
@@ -589,34 +680,45 @@ export const useApp = create<AppState>((set) => ({
 		})),
 
 	addToolCallItem: (toolCall) =>
-		set((state) => ({
-			chat: [
-				...finishStreamingMessages(state.chat),
-				readableAssistantMessage({
-					type: "tool_call",
-					toolCall,
-				}),
-			],
-		})),
+		set((state) => {
+			const chat = [...state.chat];
+			const last = chat[chat.length - 1];
+			if (last?.role === "assistant" && last.streaming && !last.item) {
+				const parts = partsFromMessage(last);
+				parts.push({ type: "tool_call", toolCall });
+				chat[chat.length - 1] = {
+					...last,
+					text: textFromParts(parts),
+					parts,
+				};
+				return { chat };
+			}
+			return {
+				chat: [
+					...chat,
+					{
+						id: crypto.randomUUID(),
+						role: "assistant",
+						text: "",
+						parts: [{ type: "tool_call", toolCall }],
+						streaming: true,
+					},
+				],
+			};
+		}),
 
 	updateToolCallItem: (id, status) =>
 		set((state) => ({
 			chat: state.chat.map((message) => {
-				if (
-					message.item?.type !== "tool_call" ||
-					message.item.toolCall.tool_call_id !== id
-				) {
+				if (!message.parts?.some((part) => part.type === "tool_call")) {
 					return message;
 				}
+				const parts = message.parts.map((part) =>
+					updateToolCallPart(part, id, status),
+				);
 				return {
 					...message,
-					item: {
-						...message.item,
-						toolCall: {
-							...message.item.toolCall,
-							status,
-						},
-					},
+					parts,
 				};
 			}),
 		})),
@@ -635,28 +737,26 @@ export const useApp = create<AppState>((set) => ({
 				d.id === id ? { ...d, ...patch } : d,
 			),
 		})),
+	dismissCommentDraft: (id) =>
+		set((state) => ({
+			commentDrafts: state.commentDrafts.filter((d) => d.id !== id),
+		})),
+	setPendingReview: (review) => set({ pendingReview: review }),
+	clearPendingReview: () => set({ pendingReview: null }),
+	markPendingReviewSubmitted: (reviewId) =>
+		set((state) => ({
+			pendingReview:
+				state.pendingReview?.review_id === reviewId ? null : state.pendingReview,
+			commentDrafts: state.commentDrafts.filter(
+				(d) => d.pending_review_id !== reviewId,
+			),
+		})),
 
 	applyCommentResult: (result) =>
 		set((state) => ({
-			commentDrafts: state.commentDrafts.map((d) => {
-				if (d.id !== result.draft_id) return d;
-				if (result.status === "published") {
-					const draft = {
-						...d,
-						status: "published" as const,
-						url: result.url,
-					};
-					delete draft.error;
-					return draft;
-				}
-				const draft = {
-					...d,
-					status: "error" as const,
-					error: result.error || "The agent could not publish the comment.",
-				};
-				delete draft.url;
-				return draft;
-			}),
+			commentDrafts: state.commentDrafts.filter(
+				(d) => d.id !== result.draft_id,
+			),
 		})),
 
 	pushError: (e) =>
@@ -701,9 +801,19 @@ export const useApp = create<AppState>((set) => ({
 		}),
 	setDiffFocusError: (error) => set({ diffFocusError: error }),
 	addPendingDiffReference: (range) =>
-		set((state) => ({
-			pendingDiffReferences: [...state.pendingDiffReferences, range],
-		})),
+		set((state) => {
+			const exists = state.pendingDiffReferences.some(
+				(r) =>
+					r.file_path === range.file_path &&
+					r.side === range.side &&
+					r.start_line === range.start_line &&
+					r.end_line === range.end_line,
+			);
+			if (exists) return {};
+			return {
+				pendingDiffReferences: [...state.pendingDiffReferences, range],
+			};
+		}),
 	removePendingDiffReference: (id) =>
 		set((state) => ({
 			pendingDiffReferences: state.pendingDiffReferences.filter(

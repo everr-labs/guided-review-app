@@ -3,6 +3,7 @@ mod agent_runner;
 mod commands;
 mod events;
 mod fenced;
+mod gh;
 mod projects;
 mod repo;
 mod section;
@@ -26,6 +27,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_agents_cmd,
             agent_skill_cmd,
+            check_gh_cli_cmd,
             start_session_cmd,
             send_message_cmd,
             end_session_cmd,
@@ -35,6 +37,10 @@ pub fn run() {
             list_recent_projects_cmd,
             inspect_local_repo_origin_cmd,
             record_recent_project_cmd,
+            create_pending_review_cmd,
+            add_pending_review_thread_cmd,
+            update_pending_review_body_cmd,
+            submit_pending_review_cmd,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

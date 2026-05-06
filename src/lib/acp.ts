@@ -20,6 +20,12 @@ export interface AgentInfo {
 	launch_command: string;
 }
 
+export interface GhCliStatus {
+	installed: boolean;
+	version?: string;
+	error?: string;
+}
+
 export type SessionSource =
 	| { kind: "pr"; repo_url: string; number: number }
 	| { kind: "branch"; repo_url: string; branch: string }
@@ -42,12 +48,30 @@ export interface PullRequestMetadata {
 	url: string;
 }
 
+export type GithubCommentSide = "LEFT" | "RIGHT";
+
+export interface PublishedPrComment {
+	id: number;
+	author_login: string;
+	body: string;
+	html_url: string;
+	created_at: string;
+	file_path?: string;
+	line?: number;
+	side?: GithubCommentSide;
+	original_line?: number;
+	original_side?: GithubCommentSide;
+	is_outdated?: boolean;
+}
+
 export interface StartSessionResponse {
 	session_id: string;
 	repo: ClonedRepo;
 	source: SessionSource;
 	pull_request?: PullRequestMetadata;
 	pull_request_error?: string;
+	published_comments: PublishedPrComment[];
+	published_comments_error?: string;
 }
 
 export interface DiffPatch {
@@ -59,6 +83,18 @@ export interface PrTarget {
 	owner: string;
 	repo: string;
 	number: number;
+}
+
+export interface PendingReview {
+	review_id: number;
+	node_id: string;
+	body: string;
+	html_url?: string;
+}
+
+export interface PendingReviewComment {
+	comment_id: string;
+	url?: string;
 }
 
 export interface LocalRepoOrigin {
@@ -197,6 +233,25 @@ export const acp = {
 			throw e;
 		}
 	},
+	checkGhCli: async () => {
+		recordClientTelemetry("client.acp.invoke.started", {
+			"tauri.command": "check_gh_cli_cmd",
+		});
+		try {
+			const status = await invoke<GhCliStatus>("check_gh_cli_cmd");
+			recordClientTelemetry("client.acp.invoke.succeeded", {
+				"tauri.command": "check_gh_cli_cmd",
+				"gh.installed": status.installed,
+				"gh.has_error": !!status.error,
+			});
+			return status;
+		} catch (e) {
+			recordClientTelemetryError("client.acp.invoke.failed", e, {
+				"tauri.command": "check_gh_cli_cmd",
+			});
+			throw e;
+		}
+	},
 	startSession: async (req: { source: SessionSource; agent_kind: AgentKind }) => {
 		recordClientTelemetry("client.acp.start_session.requested", {
 			"agent.kind": req.agent_kind,
@@ -280,6 +335,29 @@ export const acp = {
 		head_ref: string;
 		file_path?: string | null;
 	}) => invoke<DiffPatch[]>("get_diff_cmd", { args }),
+	createPendingReview: (args: {
+		target: PrTarget;
+		head_sha: string;
+		body: string;
+	}) => invoke<PendingReview>("create_pending_review_cmd", { args }),
+	addPendingReviewThread: (args: {
+		target: PrTarget;
+		review_node_id: string;
+		body: string;
+		file_path: string;
+		line: number;
+		side: GithubCommentSide;
+	}) => invoke<PendingReviewComment>("add_pending_review_thread_cmd", { args }),
+	updatePendingReviewBody: (args: {
+		target: PrTarget;
+		review_id: number;
+		body: string;
+	}) => invoke<PendingReview>("update_pending_review_body_cmd", { args }),
+	submitPendingReview: (args: {
+		target: PrTarget;
+		review_id: number;
+		body: string;
+	}) => invoke<PendingReview>("submit_pending_review_cmd", { args }),
 };
 
 export type EventName =

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useApp } from "@/lib/store";
 import {
 	on,
@@ -14,6 +14,7 @@ import {
 	type ToolCallEvent,
 	type ToolCallUpdateEvent,
 	type Unlisten,
+	type GhCliStatus,
 } from "@/lib/acp";
 import type {
 	Concern,
@@ -30,12 +31,21 @@ import { SectionList } from "@/components/SectionList";
 import { DiffPane } from "@/components/DiffView";
 import { ChatPanel } from "@/components/ChatPanel";
 import { Button } from "@/components/ui/button";
-import { PanelLeft, PanelRight } from "lucide-react";
+import { AlertTriangle, PanelLeft, PanelRight } from "lucide-react";
 import {
 	recordClientTelemetry,
 	recordClientTelemetryError,
 	truncateTelemetryText,
 } from "@/lib/telemetry";
+import { formatPublishedCommentsForPrompt } from "@/lib/publishedComments";
+import { ghCliNeedsInstallPopup, ghCliPopupMessage } from "@/lib/ghCli";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
 	return value && typeof value === "object"
@@ -178,6 +188,23 @@ export default function App() {
 	const pushStderr = useApp((s) => s.pushStderr);
 	const chatVisible = useApp((s) => s.chatVisible);
 	const toggleChat = useApp((s) => s.toggleChat);
+	const [ghCliStatus, setGhCliStatus] = useState<GhCliStatus | null>(null);
+	const [ghCliDismissed, setGhCliDismissed] = useState(false);
+
+	useEffect(() => {
+		let cancelled = false;
+		(async () => {
+			try {
+				const status = await acp.checkGhCli();
+				if (!cancelled) setGhCliStatus(status);
+			} catch (e) {
+				if (!cancelled) pushError(`gh check failed: ${e}`);
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [pushError]);
 
 	useEffect(() => {
 		recordClientTelemetry("client.app.event_listeners.effect_started", {
@@ -210,13 +237,18 @@ export default function App() {
 						"section.id": first.section_id,
 						"section.title": first.title,
 					});
+					const publishedCommentContext = formatPublishedCommentsForPrompt(
+						sess.published_comments ?? [],
+						sess.published_comments_error,
+					);
 					await acp.sendMessage(
 						sess.session_id,
-						`Walk me through the section "${first.title}" (\`${first.section_id}\`). Emit one acp-section block for it and stop.`,
+						`Walk me through the section "${first.title}" (\`${first.section_id}\`).\n\n${publishedCommentContext}\n\nEmit one acp-section block for it and stop.`,
 						{
 							origin: "section_map_auto_open",
 							sectionId: first.section_id,
 							reason: "show_first_section_immediately",
+							suppressPreview: true,
 						},
 					);
 					recordClientTelemetry("client.acp.section_map.auto_open_sent", {
@@ -373,6 +405,32 @@ export default function App() {
 
 	return (
 		<div className="grid h-screen grid-rows-[44px_1fr] bg-background text-foreground">
+			<Dialog
+				open={ghCliNeedsInstallPopup(ghCliStatus) && !ghCliDismissed}
+				onOpenChange={(open) => {
+					if (!open) setGhCliDismissed(true);
+				}}
+			>
+				<DialogContent>
+					<DialogHeader>
+						<DialogTitle className="flex items-center gap-2">
+							<AlertTriangle className="size-4 text-destructive" />
+							GitHub CLI is missing
+						</DialogTitle>
+						<DialogDescription className="whitespace-pre-line">
+							{ghCliStatus ? ghCliPopupMessage(ghCliStatus) : ""}
+						</DialogDescription>
+					</DialogHeader>
+					<div className="rounded-md border border-border bg-muted/40 px-3 py-2 font-mono text-xs">
+						brew install gh
+					</div>
+					<div className="flex justify-end">
+						<Button size="sm" onClick={() => setGhCliDismissed(true)}>
+							Dismiss
+						</Button>
+					</div>
+				</DialogContent>
+			</Dialog>
 			<header className="flex items-center gap-3 border-b border-border bg-background px-3">
 				<ProjectPicker />
 				<ReviewLauncher />

@@ -5,11 +5,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useApp } from "@/lib/store";
 import { acp, type AgentInfo, type AgentKind, type SessionSource } from "@/lib/acp";
+import {
+	loadSelectedAgentKind,
+	saveSelectedAgentKind,
+} from "@/lib/agentPreference";
 import { localReviewSourceFromInput } from "@/lib/projectSource";
 import {
 	recordClientTelemetry,
 	recordClientTelemetryError,
 } from "@/lib/telemetry";
+import { formatPublishedCommentsForPrompt } from "@/lib/publishedComments";
+
+const DEFAULT_AGENT_KIND: AgentKind = "claude_code";
 
 export function ReviewLauncher() {
 	const project = useApp((s) => s.project);
@@ -21,7 +28,9 @@ export function ReviewLauncher() {
 
 	const [input, setInput] = useState("");
 	const [agents, setAgents] = useState<AgentInfo[]>([]);
-	const [agentKind, setAgentKind] = useState<AgentKind>("claude_code");
+	const [agentKind, setAgentKind] = useState<AgentKind>(
+		() => loadSelectedAgentKind() ?? DEFAULT_AGENT_KIND,
+	);
 	const [starting, setStarting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
@@ -30,6 +39,14 @@ export function ReviewLauncher() {
 			try {
 				const list = await acp.listAgents();
 				setAgents(list);
+				setAgentKind((current) => {
+					const selectedAgentExists = list.some(
+						(agent) => agent.kind === current,
+					);
+					if (selectedAgentExists) return current;
+					saveSelectedAgentKind(DEFAULT_AGENT_KIND);
+					return DEFAULT_AGENT_KIND;
+				});
 			} catch (e) {
 				recordClientTelemetryError("client.launcher.agents_load.failed", e);
 			}
@@ -69,11 +86,16 @@ export function ReviewLauncher() {
 			setSession(res);
 			setInput("");
 			const skill = await acp.agentSkill();
-			const kickoff = `${skill}\n\n---\n\nThe repository for this review is at \`${res.repo.path}\` (base \`${res.repo.base_ref}\`, head \`${res.repo.head_ref}\`). Investigate the diff with your built-in tools, then reply with one \`\`\`acp-section-map\`\`\` fenced block describing the planned sections. After that, stop and wait for me.`;
+			const publishedCommentContext = formatPublishedCommentsForPrompt(
+				res.published_comments,
+				res.published_comments_error,
+			);
+			const kickoff = `${skill}\n\n---\n\nThe repository for this review is at \`${res.repo.path}\` (base \`${res.repo.base_ref}\`, head \`${res.repo.head_ref}\`).\n\n${publishedCommentContext}\n\nInvestigate the diff with your built-in tools, then reply with one \`\`\`acp-section-map\`\`\` fenced block describing the planned sections. After that, stop and wait for me.`;
 			addUserMessage("(starting guided review)");
 			await acp.sendMessage(res.session_id, kickoff, {
 				origin: "review_launcher_kickoff",
 				reason: "request_section_map",
+				suppressPreview: true,
 			});
 			recordClientTelemetry("client.launcher.start.kickoff_sent", {
 				"acp.session_id": res.session_id,
@@ -123,7 +145,11 @@ export function ReviewLauncher() {
 				{agents.length > 1 && (
 					<select
 						value={agentKind}
-						onChange={(e) => setAgentKind(e.target.value as AgentKind)}
+						onChange={(e) => {
+							const next = e.target.value as AgentKind;
+							setAgentKind(next);
+							saveSelectedAgentKind(next);
+						}}
 						className="h-7 rounded-md border border-border bg-input px-1.5 text-xs text-foreground"
 						disabled={starting}
 						title="Agent"

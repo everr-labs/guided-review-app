@@ -1,6 +1,7 @@
 import { useApp } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { LoaderCircle } from "lucide-react";
+import { stripMarkdownForSummary } from "@/lib/markdownContent";
 
 export function SectionList() {
 	const sections = useApp((s) => s.sections);
@@ -46,7 +47,7 @@ export function SectionList() {
 										{s.title}
 									</div>
 									<div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-										{s.intent}
+										{stripMarkdownForSummary(s.intent)}
 									</div>
 									{s.id === processingId && (
 										<div className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-primary">

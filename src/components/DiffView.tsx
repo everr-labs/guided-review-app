@@ -1,20 +1,24 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
-import type { SelectedLineRange } from "@pierre/diffs";
-import { LocateFixed, X } from "lucide-react";
+import type { DiffLineAnnotation, SelectedLineRange } from "@pierre/diffs";
+import { LocateFixed } from "lucide-react";
 import { useApp } from "@/lib/store";
 import { acp } from "@/lib/acp";
 import { SeverityBadge } from "./SeverityBadge";
-import { Button } from "@/components/ui/button";
 import {
 	createDiffFocusRange,
 	focusSideToPierreSide,
 	formatDiffFocusHeader,
-	formatDiffReferenceLabel,
 	pierreSideToFocusSide,
 	type DiffFocusRange,
 } from "@/lib/diffFocus";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
+import {
+	publishedCommentToDiffAnnotation,
+	type PublishedCommentAnnotationMetadata,
+} from "@/lib/publishedComments";
+import { MarkdownViewer } from "./MarkdownViewer";
+import { stripMarkdownForSummary } from "@/lib/markdownContent";
 
 interface FileBundle {
 	file_path: string;
@@ -58,9 +62,33 @@ function pierreRangeToFocus(
 	});
 }
 
+function focusRangeToPierreSelection(
+	range: DiffFocusRange,
+): SelectedLineRange {
+	const side = focusSideToPierreSide(range.side);
+	return {
+		start: range.start_line,
+		end: range.end_line,
+		side,
+		endSide: side,
+	};
+}
+
 function DiffFileCard({ bundle }: { bundle: FileBundle }) {
-	const focus = useApp((s) =>
-		s.diffFocus?.file_path === bundle.file_path ? s.diffFocus : null,
+	const agentFocus = useApp((s) =>
+		s.diffFocus?.source === "agent" && s.diffFocus.file_path === bundle.file_path
+			? s.diffFocus
+			: null,
+	);
+	const pendingDiffReferences = useApp((s) => s.pendingDiffReferences);
+	const publishedComments = useApp((s) => s.publishedComments);
+
+	const pendingForFile = useMemo(
+		() =>
+			pendingDiffReferences.filter(
+				(range) => range.file_path === bundle.file_path,
+			),
+		[pendingDiffReferences, bundle.file_path],
 	);
 
 	const oldFile = useMemo(
@@ -73,33 +101,28 @@ function DiffFileCard({ bundle }: { bundle: FileBundle }) {
 	);
 
 	const selectedLines: SelectedLineRange | null = useMemo(() => {
-		if (!focus) return null;
-		const side = focusSideToPierreSide(focus.side);
-		return {
-			start: focus.start_line,
-			end: focus.end_line,
-			side,
-			endSide: side,
-		};
-	}, [focus]);
+		const latestPending = pendingForFile.at(-1);
+		if (latestPending) return focusRangeToPierreSelection(latestPending);
+		return agentFocus ? focusRangeToPierreSelection(agentFocus) : null;
+	}, [pendingForFile, agentFocus]);
+
+	const lineAnnotations = useMemo(
+		(): DiffLineAnnotation<PublishedCommentAnnotationMetadata>[] =>
+			publishedComments
+				.filter((comment) => comment.file_path === bundle.file_path)
+				.map(publishedCommentToDiffAnnotation)
+				.filter(
+					(
+						annotation,
+					): annotation is DiffLineAnnotation<PublishedCommentAnnotationMetadata> =>
+						annotation !== null,
+				),
+		[publishedComments, bundle.file_path],
+	);
 
 	const onLineSelected = useCallback(
 		(range: SelectedLineRange | null) => {
-			const { diffFocus, setDiffFocus, clearDiffFocus } = useApp.getState();
-			const currentFocus =
-				diffFocus?.file_path === bundle.file_path ? diffFocus : null;
-			if (!range) {
-				if (currentFocus) {
-					recordClientTelemetry("client.diff.focus.cleared", {
-						"file.path": currentFocus.file_path,
-						"line.start": currentFocus.start_line,
-						"line.end": currentFocus.end_line,
-						"line.side": currentFocus.side,
-					});
-				}
-				clearDiffFocus(currentFocus?.id);
-				return;
-			}
+			if (!range) return;
 			const next = pierreRangeToFocus(range, bundle.file_path);
 			if (!next) return;
 			recordClientTelemetry("client.diff.focus.selected", {
@@ -108,9 +131,32 @@ function DiffFileCard({ bundle }: { bundle: FileBundle }) {
 				"line.end": next.end_line,
 				"line.side": next.side,
 			});
-			setDiffFocus(next);
+			useApp.getState().addPendingDiffReference(next);
 		},
 		[bundle.file_path],
+	);
+
+	const renderAnnotation = useCallback(
+		(annotation: DiffLineAnnotation<PublishedCommentAnnotationMetadata>) => {
+			const { comment } = annotation.metadata;
+			return (
+				<div className="border-l-2 border-[oklch(0.7_0.16_155)] bg-[oklch(0.2_0.05_155)]/35 px-2 py-1 text-xs">
+					<div className="mb-0.5 flex items-center justify-between gap-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+						<span>{comment.author_login}</span>
+						<a
+							href={comment.html_url}
+							target="_blank"
+							rel="noreferrer"
+							className="text-[oklch(0.75_0.15_155)] hover:underline"
+						>
+							GitHub
+						</a>
+					</div>
+					<div className="whitespace-pre-wrap text-foreground">{comment.body}</div>
+				</div>
+			);
+		},
+		[],
 	);
 
 	const options = useMemo(
@@ -123,35 +169,6 @@ function DiffFileCard({ bundle }: { bundle: FileBundle }) {
 		[onLineSelected],
 	);
 
-	const addReference = useCallback(() => {
-		const { diffFocus, addPendingDiffReference, clearDiffFocus } =
-			useApp.getState();
-		if (!diffFocus || diffFocus.file_path !== bundle.file_path) return;
-		addPendingDiffReference(diffFocus);
-		recordClientTelemetry("client.diff.focus.reference_added", {
-			"file.path": diffFocus.file_path,
-			"line.start": diffFocus.start_line,
-			"line.end": diffFocus.end_line,
-			"line.side": diffFocus.side,
-		});
-		clearDiffFocus(diffFocus.id);
-	}, [bundle.file_path]);
-
-	const clearSelection = useCallback(() => {
-		const { diffFocus, clearDiffFocus } = useApp.getState();
-		if (!diffFocus || diffFocus.file_path !== bundle.file_path) return;
-		recordClientTelemetry("client.diff.focus.cleared", {
-			"file.path": diffFocus.file_path,
-			"line.start": diffFocus.start_line,
-			"line.end": diffFocus.end_line,
-			"line.side": diffFocus.side,
-		});
-		clearDiffFocus(diffFocus.id);
-	}, [bundle.file_path]);
-
-	const showToolbar =
-		focus?.source === "user" && focus.mode === "draft-reference";
-
 	return (
 		<div
 			data-file-path={bundle.file_path}
@@ -159,26 +176,14 @@ function DiffFileCard({ bundle }: { bundle: FileBundle }) {
 		>
 			<div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5 font-mono text-xs">
 				<span className="truncate">{bundle.file_path}</span>
-				{showToolbar && focus && (
-					<div className="ml-auto flex items-center gap-1.5">
-						<span className="text-muted-foreground">
-							{formatDiffReferenceLabel(focus)}
-						</span>
-						<Button size="sm" onClick={addReference}>
-							@Tag
-						</Button>
-						<Button size="sm" variant="outline" onClick={clearSelection}>
-							<X className="size-3.5" />
-							Clear
-						</Button>
-					</div>
-				)}
 			</div>
 			<MultiFileDiff
 				oldFile={oldFile}
 				newFile={newFile}
 				options={options}
+				lineAnnotations={lineAnnotations}
 				selectedLines={selectedLines}
+				renderAnnotation={renderAnnotation}
 			/>
 		</div>
 	);
@@ -336,8 +341,8 @@ export function DiffPane() {
 							{current.error}
 						</div>
 					)}
-					<div className="whitespace-pre-wrap rounded-md border border-border bg-card/40 px-4 py-3 text-sm leading-relaxed">
-						{current.body}
+					<div className="rounded-md border border-border bg-card/40 px-4 py-3">
+						<MarkdownViewer markdown={current.body} />
 					</div>
 				</div>
 			</section>
@@ -348,7 +353,7 @@ export function DiffPane() {
 		return (
 			<section className="flex min-h-0 flex-col items-center justify-center px-8 text-sm text-muted-foreground">
 				<p className="font-medium text-foreground">{current.title}</p>
-				<p className="mt-1">{current.intent}</p>
+				<p className="mt-1">{stripMarkdownForSummary(current.intent)}</p>
 				<p className="mt-3 text-xs">
 					Ask the agent to walk you through this section.
 				</p>
@@ -360,7 +365,10 @@ export function DiffPane() {
 		<section className="flex min-h-0 flex-col overflow-y-auto">
 			<header className="border-b border-border bg-card/40 px-6 py-4">
 				<h2 className="text-base font-semibold">{section!.title}</h2>
-				<p className="mt-1 text-sm text-muted-foreground">{section!.intent}</p>
+				<MarkdownViewer
+					markdown={section!.intent}
+					className="mt-1 text-muted-foreground"
+				/>
 				<div className="mt-2 flex gap-3 font-mono text-[11px] text-muted-foreground">
 					<span>
 						<strong className="text-foreground/80">base:</strong>{" "}
@@ -454,11 +462,6 @@ export function DiffPane() {
 				</div>
 			)}
 
-			{section!.pause_prompt && (
-				<div className="m-4 rounded-md border-l-2 border-primary bg-primary/10 px-4 py-2.5 text-sm text-primary">
-					{section!.pause_prompt}
-				</div>
-			)}
 		</section>
 	);
 }

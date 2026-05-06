@@ -1,5 +1,7 @@
+use crate::gh::{self, GhApiJsonRequest};
 use anyhow::{anyhow, Context, Result};
 use git2::{DiffOptions, Repository};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -39,11 +41,87 @@ pub struct PullRequestMetadata {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublishedPrComment {
+    pub id: u64,
+    pub author_login: String,
+    pub body: String,
+    pub html_url: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_side: Option<String>,
+    #[serde(default)]
+    pub is_outdated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingReview {
+    pub review_id: u64,
+    pub node_id: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingReviewComment {
+    pub comment_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct GhPullRequestMetadata {
     title: String,
     body: Option<String>,
     url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhUser {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPullRequestReviewComment {
+    id: u64,
+    user: Option<GhUser>,
+    body: String,
+    html_url: String,
+    created_at: String,
+    path: Option<String>,
+    line: Option<u32>,
+    side: Option<String>,
+    original_line: Option<u32>,
+    original_side: Option<String>,
+    #[serde(default)]
+    outdated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPullRequestReviewSummary {
+    id: u64,
+    user: Option<GhUser>,
+    body: Option<String>,
+    html_url: String,
+    submitted_at: Option<String>,
+    state: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPendingReview {
+    id: u64,
+    node_id: String,
+    body: Option<String>,
+    html_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,6 +456,24 @@ pub fn gh_pr_view_args(owner: &str, repo: &str, number: u64) -> Vec<String> {
     ]
 }
 
+pub fn gh_review_comments_args(owner: &str, repo: &str, number: u64) -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "--paginate".to_string(),
+        "--slurp".to_string(),
+        format!("/repos/{owner}/{repo}/pulls/{number}/comments?per_page=100"),
+    ]
+}
+
+pub fn gh_review_summaries_args(owner: &str, repo: &str, number: u64) -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "--paginate".to_string(),
+        "--slurp".to_string(),
+        format!("/repos/{owner}/{repo}/pulls/{number}/reviews?per_page=100"),
+    ]
+}
+
 pub fn parse_pull_request_metadata_json(raw: &str) -> Result<PullRequestMetadata> {
     let gh: GhPullRequestMetadata = serde_json::from_str(raw)?;
     Ok(PullRequestMetadata {
@@ -387,6 +483,67 @@ pub fn parse_pull_request_metadata_json(raw: &str) -> Result<PullRequestMetadata
     })
 }
 
+fn parse_paginated_gh_array<T: DeserializeOwned>(raw: &str) -> Result<Vec<T>> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    match value.as_array() {
+        Some(pages) if pages.first().is_some_and(|page| page.is_array()) => {
+            let mut items = Vec::new();
+            for page in pages {
+                items.extend(serde_json::from_value::<Vec<T>>(page.clone())?);
+            }
+            Ok(items)
+        }
+        _ => serde_json::from_value(value).map_err(Into::into),
+    }
+}
+
+pub fn parse_pull_request_review_comments_json(raw: &str) -> Result<Vec<PublishedPrComment>> {
+    let gh: Vec<GhPullRequestReviewComment> = parse_paginated_gh_array(raw)?;
+    Ok(gh
+        .into_iter()
+        .map(|comment| PublishedPrComment {
+            id: comment.id,
+            author_login: comment.user.map(|user| user.login).unwrap_or_default(),
+            body: comment.body,
+            html_url: comment.html_url,
+            created_at: comment.created_at,
+            file_path: comment.path,
+            line: comment.line,
+            side: comment.side,
+            original_line: comment.original_line,
+            original_side: comment.original_side,
+            is_outdated: comment.outdated,
+        })
+        .collect())
+}
+
+pub fn parse_pull_request_review_summaries_json(raw: &str) -> Result<Vec<PublishedPrComment>> {
+    let gh: Vec<GhPullRequestReviewSummary> = parse_paginated_gh_array(raw)?;
+    Ok(gh
+        .into_iter()
+        .filter(|review| !review.state.eq_ignore_ascii_case("PENDING"))
+        .filter_map(|review| {
+            let body = review.body.unwrap_or_default().trim().to_string();
+            if body.is_empty() {
+                return None;
+            }
+            Some(PublishedPrComment {
+                id: review.id,
+                author_login: review.user.map(|user| user.login).unwrap_or_default(),
+                body,
+                html_url: review.html_url,
+                created_at: review.submitted_at.unwrap_or_default(),
+                file_path: None,
+                line: None,
+                side: None,
+                original_line: None,
+                original_side: None,
+                is_outdated: false,
+            })
+        })
+        .collect())
+}
+
 pub async fn fetch_pull_request_metadata(
     repo_url: &str,
     number: u64,
@@ -394,21 +551,178 @@ pub async fn fetch_pull_request_metadata(
     let repo = parse_github_repo_url(repo_url)
         .ok_or_else(|| anyhow!("PR metadata requires a GitHub repository URL"))?;
     let args = gh_pr_view_args(&repo.owner, &repo.repo, number);
-    let out = Command::new("gh")
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .with_context(|| format!("running gh {args:?}"))?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "gh pr view failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    let raw = gh::output(&args).await?;
+    parse_pull_request_metadata_json(&raw)
+}
+
+pub async fn fetch_pull_request_review_comments(
+    repo_url: &str,
+    number: u64,
+) -> Result<Vec<PublishedPrComment>> {
+    let repo = parse_github_repo_url(repo_url)
+        .ok_or_else(|| anyhow!("PR comments require a GitHub repository URL"))?;
+    let comment_args = gh_review_comments_args(&repo.owner, &repo.repo, number);
+    let comments_raw = gh::output(&comment_args).await?;
+    let mut comments = parse_pull_request_review_comments_json(&comments_raw)?;
+
+    let review_args = gh_review_summaries_args(&repo.owner, &repo.repo, number);
+    let summaries_raw = gh::output(&review_args).await?;
+    comments.extend(parse_pull_request_review_summaries_json(&summaries_raw)?);
+    Ok(comments)
+}
+
+pub fn create_pending_review_request(
+    owner: &str,
+    repo: &str,
+    number: u64,
+    head_sha: &str,
+    body: &str,
+) -> GhApiJsonRequest {
+    GhApiJsonRequest {
+        method: "POST".to_string(),
+        path: format!("/repos/{owner}/{repo}/pulls/{number}/reviews"),
+        body: serde_json::json!({
+            "commit_id": head_sha,
+            "body": body,
+        }),
     }
-    parse_pull_request_metadata_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+pub fn update_pending_review_body_request(
+    owner: &str,
+    repo: &str,
+    number: u64,
+    review_id: u64,
+    body: &str,
+) -> GhApiJsonRequest {
+    GhApiJsonRequest {
+        method: "PATCH".to_string(),
+        path: format!("/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}"),
+        body: serde_json::json!({ "body": body }),
+    }
+}
+
+pub fn submit_pending_review_request(
+    owner: &str,
+    repo: &str,
+    number: u64,
+    review_id: u64,
+    body: &str,
+) -> GhApiJsonRequest {
+    GhApiJsonRequest {
+        method: "POST".to_string(),
+        path: format!("/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/events"),
+        body: serde_json::json!({
+            "event": "COMMENT",
+            "body": body,
+        }),
+    }
+}
+
+pub fn add_pending_review_thread_request(
+    review_node_id: &str,
+    body: &str,
+    file_path: &str,
+    line: u32,
+    side: &str,
+) -> GhApiJsonRequest {
+    GhApiJsonRequest {
+        method: "POST".to_string(),
+        path: "graphql".to_string(),
+        body: serde_json::json!({
+            "query": "mutation($input:AddPullRequestReviewThreadInput!){addPullRequestReviewThread(input:$input){comment{id url}}}",
+            "variables": {
+                "input": {
+                    "pullRequestReviewId": review_node_id,
+                    "body": body,
+                    "path": file_path,
+                    "line": line,
+                    "side": side,
+                }
+            }
+        }),
+    }
+}
+
+fn parse_pending_review_json(raw: &str) -> Result<PendingReview> {
+    let review: GhPendingReview = serde_json::from_str(raw)?;
+    Ok(PendingReview {
+        review_id: review.id,
+        node_id: review.node_id,
+        body: review.body.unwrap_or_default(),
+        html_url: review.html_url,
+    })
+}
+
+fn parse_pending_review_comment_json(raw: &str) -> Result<PendingReviewComment> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    let comment = &value["data"]["addPullRequestReviewThread"]["comment"];
+    let comment_id = comment["id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("GitHub response did not include a review comment id"))?
+        .to_string();
+    let url = comment["url"].as_str().map(|url| url.to_string());
+    Ok(PendingReviewComment { comment_id, url })
+}
+
+pub async fn create_pending_review(
+    owner: &str,
+    repo: &str,
+    number: u64,
+    head_sha: &str,
+    body: &str,
+) -> Result<PendingReview> {
+    let raw = gh::api_json(create_pending_review_request(
+        owner, repo, number, head_sha, body,
+    ))
+    .await?;
+    parse_pending_review_json(&raw)
+}
+
+pub async fn update_pending_review_body(
+    owner: &str,
+    repo: &str,
+    number: u64,
+    review_id: u64,
+    body: &str,
+) -> Result<PendingReview> {
+    let raw = gh::api_json(update_pending_review_body_request(
+        owner, repo, number, review_id, body,
+    ))
+    .await?;
+    parse_pending_review_json(&raw)
+}
+
+pub async fn submit_pending_review(
+    owner: &str,
+    repo: &str,
+    number: u64,
+    review_id: u64,
+    body: &str,
+) -> Result<PendingReview> {
+    let raw = gh::api_json(submit_pending_review_request(
+        owner, repo, number, review_id, body,
+    ))
+    .await?;
+    parse_pending_review_json(&raw)
+}
+
+pub async fn add_pending_review_thread(
+    review_node_id: &str,
+    body: &str,
+    file_path: &str,
+    line: u32,
+    side: &str,
+) -> Result<PendingReviewComment> {
+    let raw = gh::api_json(add_pending_review_thread_request(
+        review_node_id,
+        body,
+        file_path,
+        line,
+        side,
+    ))
+    .await?;
+    parse_pending_review_comment_json(&raw)
 }
 
 async fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<()> {
@@ -621,6 +935,130 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gh_review_comments_args_target_the_pr_review_comments_endpoint() {
+        assert_eq!(
+            gh_review_comments_args("garden-co", "jazz", 787),
+            vec![
+                "api",
+                "--paginate",
+                "--slurp",
+                "/repos/garden-co/jazz/pulls/787/comments?per_page=100",
+            ]
+        );
+    }
+
+    #[test]
+    fn gh_review_summaries_args_target_the_pr_reviews_endpoint() {
+        assert_eq!(
+            gh_review_summaries_args("garden-co", "jazz", 787),
+            vec![
+                "api",
+                "--paginate",
+                "--slurp",
+                "/repos/garden-co/jazz/pulls/787/reviews?per_page=100",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_pull_request_review_comments_json_keeps_diff_location() {
+        let comments = parse_pull_request_review_comments_json(
+            r###"[
+                [
+                    {
+                        "id": 101,
+                        "user": { "login": "mona" },
+                        "body": "This has already been reviewed.",
+                        "html_url": "https://github.com/garden-co/jazz/pull/787#discussion_r101",
+                        "created_at": "2026-05-05T10:00:00Z",
+                        "path": "src/main.ts",
+                        "line": 12,
+                        "side": "RIGHT",
+                        "original_line": 9,
+                        "original_side": "RIGHT",
+                        "outdated": false
+                    }
+                ]
+            ]"###,
+        )
+        .unwrap();
+
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].id, 101);
+        assert_eq!(comments[0].author_login, "mona");
+        assert_eq!(comments[0].file_path.as_deref(), Some("src/main.ts"));
+        assert_eq!(comments[0].line, Some(12));
+        assert_eq!(comments[0].side.as_deref(), Some("RIGHT"));
+        assert!(!comments[0].is_outdated);
+    }
+
+    #[test]
+    fn parse_pull_request_review_summaries_json_keeps_top_level_bodies() {
+        let comments = parse_pull_request_review_summaries_json(
+            r###"[
+                [
+                    {
+                        "id": 202,
+                        "user": { "login": "hubot" },
+                        "body": "Top-level review feedback.",
+                        "html_url": "https://github.com/garden-co/jazz/pull/787#pullrequestreview-202",
+                        "submitted_at": "2026-05-05T11:00:00Z",
+                        "state": "COMMENTED"
+                    },
+                    {
+                        "id": 203,
+                        "user": { "login": "hubot" },
+                        "body": "",
+                        "html_url": "https://github.com/garden-co/jazz/pull/787#pullrequestreview-203",
+                        "submitted_at": "2026-05-05T11:10:00Z",
+                        "state": "COMMENTED"
+                    }
+                ]
+            ]"###,
+        )
+        .unwrap();
+
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].id, 202);
+        assert_eq!(comments[0].author_login, "hubot");
+        assert_eq!(comments[0].body, "Top-level review feedback.");
+        assert_eq!(comments[0].created_at, "2026-05-05T11:00:00Z");
+        assert_eq!(comments[0].file_path, None);
+    }
+
+    #[test]
+    fn create_pending_review_request_omits_submit_event() {
+        let request = create_pending_review_request(
+            "garden-co",
+            "jazz",
+            787,
+            "57d6bce6ed8e3750f829ff9e9a48b76615df11d6",
+            "Summary note.",
+        );
+
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/repos/garden-co/jazz/pulls/787/reviews");
+        assert_eq!(
+            request.body["commit_id"],
+            "57d6bce6ed8e3750f829ff9e9a48b76615df11d6"
+        );
+        assert_eq!(request.body["body"], "Summary note.");
+        assert!(request.body.get("event").is_none());
+    }
+
+    #[test]
+    fn submit_pending_review_request_uses_comment_event() {
+        let request = submit_pending_review_request("garden-co", "jazz", 787, 44, "Summary note.");
+
+        assert_eq!(
+            request.path,
+            "/repos/garden-co/jazz/pulls/787/reviews/44/events",
+        );
+        assert_eq!(request.body["event"], "COMMENT");
+        assert_eq!(request.body["body"], "Summary note.");
+    }
+
     #[tokio::test]
     async fn prepare_local_branch_serializes_resolved_head_sha() {
         let repo_path = temp_repo_path("head-sha");
@@ -662,10 +1100,7 @@ mod tests {
         run_git_sync(&remote_path, &["checkout", "-b", "feature"]);
         write_and_commit(&remote_path, "README.md", "pr\n", "pr");
         let pr_sha = git_output_sync(&remote_path, &["rev-parse", "feature"]);
-        run_git_sync(
-            &remote_path,
-            &["update-ref", "refs/pull/391/head", &pr_sha],
-        );
+        run_git_sync(&remote_path, &["update-ref", "refs/pull/391/head", &pr_sha]);
         run_git_sync(&remote_path, &["checkout", "main"]);
 
         run_git_sync(

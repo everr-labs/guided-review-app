@@ -76,10 +76,13 @@ export interface ToolCallItem {
 	status: string;
 }
 
+export type ChatMessagePart =
+	| { type: "markdown"; text: string }
+	| { type: "tool_call"; toolCall: ToolCallItem };
+
 export type ChatItem =
 	| { type: "section_map"; sections: SectionMapEntry[] }
-	| { type: "review_section"; section: ReviewSection }
-	| { type: "tool_call"; toolCall: ToolCallItem };
+	| { type: "review_section"; section: ReviewSection };
 
 export interface ChatMessage {
 	id: string;
@@ -87,4 +90,5 @@ export interface ChatMessage {
 	text: string;
 	streaming?: boolean;
 	item?: ChatItem;
+	parts?: ChatMessagePart[];
 }

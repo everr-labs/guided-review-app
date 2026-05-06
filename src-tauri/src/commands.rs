@@ -1,9 +1,13 @@
 use crate::acp_client::{start_session, AcpSessions};
 use crate::agent_runner::{list_agents, AgentInfo, AgentKind};
+use crate::gh::{check_installation, GhCliStatus};
 use crate::projects::{self, RecentProject};
 use crate::repo::{
-    fetch_pull_request_metadata, get_diff, get_file_at_ref, inspect_origin, parse_pr_url,
-    resolve_source, ClonedRepo, DiffPatch, GithubRepoInfo, PullRequestMetadata, SessionSource,
+    add_pending_review_thread, create_pending_review, fetch_pull_request_metadata,
+    fetch_pull_request_review_comments, get_diff, get_file_at_ref, inspect_origin, parse_pr_url,
+    resolve_source, submit_pending_review, update_pending_review_body, ClonedRepo, DiffPatch,
+    GithubRepoInfo, PendingReview, PendingReviewComment, PublishedPrComment, PullRequestMetadata,
+    SessionSource,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -23,6 +27,8 @@ pub struct StartSessionResponse {
     pub source: SessionSource,
     pub pull_request: Option<PullRequestMetadata>,
     pub pull_request_error: Option<String>,
+    pub published_comments: Vec<PublishedPrComment>,
+    pub published_comments_error: Option<String>,
 }
 
 const AGENT_SKILL: &str = include_str!("../../agent-skill.md");
@@ -35,6 +41,11 @@ pub async fn list_agents_cmd() -> Vec<AgentInfo> {
 #[tauri::command]
 pub async fn agent_skill_cmd() -> &'static str {
     AGENT_SKILL
+}
+
+#[tauri::command]
+pub async fn check_gh_cli_cmd() -> GhCliStatus {
+    check_installation().await
 }
 
 #[tauri::command]
@@ -58,6 +69,8 @@ pub async fn start_session_cmd(
         tracing::info!(repo = %cloned.display_slug, head = %cloned.head_ref, base = %cloned.base_ref, "repo ready");
 
         let (pull_request, pull_request_error) = pull_request_metadata_for_source(&req.source).await;
+        let (published_comments, published_comments_error) =
+            published_comments_for_source(&req.source).await;
 
         let session = start_session(app, req.agent_kind, cloned.path.clone())
             .await
@@ -114,10 +127,35 @@ pub async fn start_session_cmd(
             source: req.source,
             pull_request,
             pull_request_error,
+            published_comments,
+            published_comments_error,
         })
     }
     .instrument(span)
     .await
+}
+
+async fn published_comments_for_source(
+    source: &SessionSource,
+) -> (Vec<PublishedPrComment>, Option<String>) {
+    let target = match source {
+        SessionSource::Pr { repo_url, number }
+        | SessionSource::LocalPr {
+            repo_url, number, ..
+        } => Some((repo_url, *number)),
+        _ => None,
+    };
+    let Some((repo_url, number)) = target else {
+        return (Vec::new(), None);
+    };
+    match fetch_pull_request_review_comments(repo_url, number).await {
+        Ok(comments) => (comments, None),
+        Err(e) => {
+            let message = e.to_string();
+            tracing::warn!(error = %message, "PR review comments unavailable");
+            (Vec::new(), Some(message))
+        }
+    }
 }
 
 async fn pull_request_metadata_for_source(
@@ -264,4 +302,103 @@ pub async fn get_diff_cmd(args: GetDiffArgs) -> Result<Vec<DiffPatch>, String> {
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrTarget {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePendingReviewArgs {
+    pub target: PrTarget,
+    pub head_sha: String,
+    pub body: String,
+}
+
+#[tauri::command]
+pub async fn create_pending_review_cmd(
+    args: CreatePendingReviewArgs,
+) -> Result<PendingReview, String> {
+    create_pending_review(
+        &args.target.owner,
+        &args.target.repo,
+        args.target.number,
+        &args.head_sha,
+        &args.body,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddPendingReviewThreadArgs {
+    pub target: PrTarget,
+    pub review_node_id: String,
+    pub body: String,
+    pub file_path: String,
+    pub line: u32,
+    pub side: String,
+}
+
+#[tauri::command]
+pub async fn add_pending_review_thread_cmd(
+    args: AddPendingReviewThreadArgs,
+) -> Result<PendingReviewComment, String> {
+    let _target = args.target;
+    add_pending_review_thread(
+        &args.review_node_id,
+        &args.body,
+        &args.file_path,
+        args.line,
+        &args.side,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatePendingReviewBodyArgs {
+    pub target: PrTarget,
+    pub review_id: u64,
+    pub body: String,
+}
+
+#[tauri::command]
+pub async fn update_pending_review_body_cmd(
+    args: UpdatePendingReviewBodyArgs,
+) -> Result<PendingReview, String> {
+    update_pending_review_body(
+        &args.target.owner,
+        &args.target.repo,
+        args.target.number,
+        args.review_id,
+        &args.body,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitPendingReviewArgs {
+    pub target: PrTarget,
+    pub review_id: u64,
+    pub body: String,
+}
+
+#[tauri::command]
+pub async fn submit_pending_review_cmd(
+    args: SubmitPendingReviewArgs,
+) -> Result<PendingReview, String> {
+    submit_pending_review(
+        &args.target.owner,
+        &args.target.repo,
+        args.target.number,
+        args.review_id,
+        &args.body,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }

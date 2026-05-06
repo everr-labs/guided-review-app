@@ -11,15 +11,37 @@ import {
 	ListChecks,
 	LoaderCircle,
 	Map,
-	Wrench,
+	Maximize2,
 	X,
 } from "lucide-react";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
 import {
+	prTargetFromSessionSource,
+	requestSubmitPendingReview,
+} from "@/lib/commentPublish";
+import {
 	formatDiffReferenceForMessage,
 	formatDiffReferenceLabel,
 } from "@/lib/diffFocus";
-import type { ChatItem, Concern } from "@/lib/types/section";
+import {
+	assistantPartsToMarkdown,
+	stripMarkdownForSummary,
+} from "@/lib/markdownContent";
+import { MarkdownViewer } from "./MarkdownViewer";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
+import type {
+	ChatItem,
+	ChatMessage,
+	ChatMessagePart,
+	Concern,
+	ToolCallItem,
+} from "@/lib/types/section";
 
 function FeedbackList({ title, concerns }: { title: string; concerns: Concern[] }) {
 	if (concerns.length === 0) return null;
@@ -65,7 +87,7 @@ function ChatItemView({ item }: { item: ChatItem }) {
 						<li key={section.section_id} className="min-w-0">
 							<div className="font-medium leading-tight">{section.title}</div>
 							<div className="mt-0.5 text-xs text-muted-foreground">
-								{section.intent}
+								{stripMarkdownForSummary(section.intent)}
 							</div>
 						</li>
 					))}
@@ -87,7 +109,7 @@ function ChatItemView({ item }: { item: ChatItem }) {
 					<span>{section.title}</span>
 				</div>
 				<div className="mb-2 text-xs text-muted-foreground">
-					{section.intent}
+					{stripMarkdownForSummary(section.intent)}
 				</div>
 				{section.files.length > 0 && (
 					<div className="mb-3 space-y-1.5">
@@ -132,17 +154,52 @@ function ChatItemView({ item }: { item: ChatItem }) {
 		);
 	}
 
+	return null;
+}
+
+function partsFromMessage(message: ChatMessage): ChatMessagePart[] {
+	if (message.parts) return message.parts;
+	return message.text ? [{ type: "markdown", text: message.text }] : [];
+}
+
+interface FullPageResponse {
+	markdown: string;
+	toolCalls: ToolCallItem[];
+}
+
+function AssistantResponseView({
+	message,
+	onOpenFullPage,
+}: {
+	message: ChatMessage;
+	onOpenFullPage: (response: FullPageResponse) => void;
+}) {
+	const response = assistantPartsToMarkdown(partsFromMessage(message));
+	const canOpenFullPage = response.markdown.trim().length > 0;
+
 	return (
-		<div className="rounded-md border border-border bg-card px-3 py-2 text-sm">
-			<div className="flex items-center gap-2">
-				<Wrench className="size-4 text-muted-foreground" />
-				<div className="min-w-0 flex-1">
-					<div className="truncate font-medium">{item.toolCall.title}</div>
-					<div className="text-xs text-muted-foreground">
-						{item.toolCall.kind} · {item.toolCall.status}
-					</div>
-				</div>
-			</div>
+		<div className="relative rounded-md border border-border bg-card px-3 py-2 text-foreground">
+			{canOpenFullPage && (
+				<Button
+					type="button"
+					variant="ghost"
+					size="icon"
+					className="absolute right-1.5 top-1.5 h-7 w-7 text-muted-foreground hover:text-foreground"
+					onClick={() => onOpenFullPage(response)}
+					title="Open response"
+					aria-label="Open response"
+				>
+					<Maximize2 className="size-3.5" />
+				</Button>
+			)}
+			<MarkdownViewer
+				markdown={response.markdown}
+				toolCalls={response.toolCalls}
+				className={canOpenFullPage ? "pr-7" : undefined}
+			/>
+			{message.streaming && (
+				<span className="ml-0.5 animate-pulse text-sm">▋</span>
+			)}
 		</div>
 	);
 }
@@ -151,6 +208,7 @@ export function ChatPanel() {
 	const session = useApp((s) => s.session);
 	const chat = useApp((s) => s.chat);
 	const drafts = useApp((s) => s.commentDrafts);
+	const pendingReview = useApp((s) => s.pendingReview);
 	const streaming = useApp((s) => s.streaming);
 	const sections = useApp((s) => s.sections);
 	const processingSectionId = useApp((s) => s.processingSectionId);
@@ -163,8 +221,15 @@ export function ChatPanel() {
 	const clearPendingDiffReferences = useApp(
 		(s) => s.clearPendingDiffReferences,
 	);
+	const updateCommentDraft = useApp((s) => s.updateCommentDraft);
+	const markPendingReviewSubmitted = useApp(
+		(s) => s.markPendingReviewSubmitted,
+	);
 
 	const [input, setInput] = useState("");
+	const [submittingReview, setSubmittingReview] = useState(false);
+	const [fullPageResponse, setFullPageResponse] =
+		useState<FullPageResponse | null>(null);
 	const scrollerRef = useRef<HTMLDivElement>(null);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const processingSection = processingSectionId
@@ -213,6 +278,31 @@ export function ChatPanel() {
 		}
 	}
 
+	async function submitPendingReview() {
+		if (!session || !pendingReview || submittingReview) return;
+		const target = prTargetFromSessionSource(session.source);
+		if (!target) {
+			pushError("PR target unknown.");
+			return;
+		}
+		setSubmittingReview(true);
+		try {
+			await requestSubmitPendingReview({
+				target,
+				pending_review: pendingReview,
+				comment_drafts: drafts,
+				updateCommentDraft,
+				markPendingReviewSubmitted,
+				submitPendingReview: acp.submitPendingReview,
+			});
+		} catch (e) {
+			const message = e instanceof Error ? e.message : String(e);
+			pushError(message || "Could not submit the pending review.");
+		} finally {
+			setSubmittingReview(false);
+		}
+	}
+
 	function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
 		// Enter sends; Cmd/Ctrl+Enter inserts a newline.
 		if (e.key === "Enter" && !e.shiftKey && !(e.metaKey || e.ctrlKey)) {
@@ -238,6 +328,30 @@ export function ChatPanel() {
 
 	return (
 		<aside className="flex min-h-0 min-w-0 flex-col border-l border-border bg-card/30">
+			<Dialog
+				open={!!fullPageResponse}
+				onOpenChange={(open) => {
+					if (!open) setFullPageResponse(null);
+				}}
+			>
+				<DialogContent className="grid h-[calc(100vh-2rem)] max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-none grid-rows-[auto_1fr] gap-0 p-0">
+					<DialogHeader className="border-b border-border px-6 py-4">
+						<DialogTitle>Assistant response</DialogTitle>
+						<DialogDescription className="sr-only">
+							Full page view of the selected assistant response.
+						</DialogDescription>
+					</DialogHeader>
+					<div className="min-h-0 overflow-y-auto px-6 py-5">
+						{fullPageResponse && (
+							<MarkdownViewer
+								markdown={fullPageResponse.markdown}
+								toolCalls={fullPageResponse.toolCalls}
+								className="mx-auto max-w-4xl text-base"
+							/>
+						)}
+					</div>
+				</DialogContent>
+			</Dialog>
 			<div className="border-b border-border px-4 py-3 text-sm font-semibold text-muted-foreground">
 				Chat
 			</div>
@@ -246,7 +360,9 @@ export function ChatPanel() {
 				className="flex-1 space-y-3 overflow-y-auto px-4 py-4"
 			>
 				{chat.map((m) => {
-					if (!m.item && !m.text && !m.streaming) return null;
+					if (!m.item && !m.text && !m.streaming && !m.parts?.length) {
+						return null;
+					}
 					return (
 						<div key={m.id} className="space-y-1">
 							<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -254,13 +370,16 @@ export function ChatPanel() {
 							</div>
 							{m.item ? (
 								<ChatItemView item={m.item} />
+							) : m.role === "assistant" ? (
+								<AssistantResponseView
+									message={m}
+									onOpenFullPage={setFullPageResponse}
+								/>
 							) : (
 								<div
 									className={cn(
 										"whitespace-pre-wrap break-words rounded-md px-3 py-2 text-sm leading-relaxed",
-										m.role === "user"
-											? "bg-primary/15 text-foreground"
-											: "border border-border bg-card text-foreground",
+										"bg-primary/15 text-foreground",
 									)}
 								>
 									{m.text}
@@ -286,6 +405,23 @@ export function ChatPanel() {
 						{drafts.map((d) => (
 							<CommentDraftCard key={d.id} state={d} />
 						))}
+						{pendingReview &&
+							drafts.some(
+								(d) =>
+									d.status === "pending_review" &&
+									d.pending_review_id === pendingReview.review_id,
+							) && (
+								<Button
+									size="sm"
+									onClick={submitPendingReview}
+									disabled={submittingReview}
+								>
+									{submittingReview ? (
+										<LoaderCircle className="size-3.5 animate-spin" />
+									) : null}
+									Submit review comments
+								</Button>
+							)}
 					</div>
 				)}
 			</div>

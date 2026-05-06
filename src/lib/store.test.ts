@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { DiffFocusRange } from "./diffFocus";
 import type { ChatMessage } from "./types/section";
 import type { LocalProject } from "./projectSource";
 import type { SectionState } from "./store";
@@ -47,6 +48,46 @@ const prSession = {
 	},
 };
 
+const publishedComment = {
+	id: 101,
+	author_login: "mona",
+	body: "This has already been reviewed.",
+	html_url: "https://github.com/openai/codex/pull/123#discussion_r101",
+	created_at: "2026-05-05T10:00:00Z",
+	file_path: "src/main.ts",
+	line: 12,
+	side: "RIGHT" as const,
+	is_outdated: false,
+};
+
+const diffRefA: DiffFocusRange = {
+	id: "ref-a",
+	file_path: "src/lib/store.ts",
+	start_line: 12,
+	end_line: 14,
+	side: "RIGHT",
+	source: "user",
+	mode: "draft-reference",
+	created_at: 1,
+};
+
+const duplicateDiffRefA: DiffFocusRange = {
+	...diffRefA,
+	id: "ref-a-new-id",
+	created_at: 2,
+};
+
+const diffRefB: DiffFocusRange = {
+	id: "ref-b",
+	file_path: "src/lib/store.ts",
+	start_line: 21,
+	end_line: 21,
+	side: "LEFT",
+	source: "user",
+	mode: "draft-reference",
+	created_at: 3,
+};
+
 async function resetReviewState() {
 	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
 	useApp.setState({
@@ -56,6 +97,10 @@ async function resetReviewState() {
 		processingSectionId: null,
 		chat: [],
 		commentDrafts: [],
+		pendingReview: null,
+		publishedComments: [],
+		publishedCommentsFetchedAt: null,
+		publishedCommentsError: null,
 		streaming: false,
 		errors: [],
 		stderr: [],
@@ -83,6 +128,29 @@ test("setSession creates and selects the PR description section when metadata is
 		"## Summary\n\nMake the review easier to follow.",
 	);
 	assert.equal(useApp.getState().currentSectionId, "pr-description");
+});
+
+test("setSession stores one-off published PR comment context", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	const before = Date.now();
+	useApp.getState().setSession({
+		...prSession,
+		published_comments: [publishedComment],
+		published_comments_error: "some comments could not be read",
+	});
+	const after = Date.now();
+
+	assert.deepEqual(useApp.getState().publishedComments, [publishedComment]);
+	assert.equal(
+		useApp.getState().publishedCommentsError,
+		"some comments could not be read",
+	);
+	const fetchedAt = useApp.getState().publishedCommentsFetchedAt;
+	assert.equal(typeof fetchedAt, "number");
+	assert(fetchedAt! >= before);
+	assert(fetchedAt! <= after);
 });
 
 test("setSectionMap keeps PR description first and appends agent sections", async () => {
@@ -262,6 +330,32 @@ test("section processing state clears when the requested section arrives", async
 	assert.equal(useApp.getState().processingSectionId, null);
 });
 
+test("pending diff references dedupe by file side and line range", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().addPendingDiffReference(diffRefA);
+	useApp.getState().addPendingDiffReference(duplicateDiffRefA);
+
+	assert.deepEqual(useApp.getState().pendingDiffReferences, [diffRefA]);
+});
+
+test("pending diff references can remove one reference or clear all", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().addPendingDiffReference(diffRefA);
+	useApp.getState().addPendingDiffReference(diffRefB);
+
+	useApp.getState().removePendingDiffReference(diffRefA.id);
+
+	assert.deepEqual(useApp.getState().pendingDiffReferences, [diffRefB]);
+
+	useApp.getState().clearPendingDiffReferences();
+
+	assert.deepEqual(useApp.getState().pendingDiffReferences, []);
+});
+
 test("addSectionMapItem stores readable section map details", async () => {
 	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
 
@@ -326,6 +420,96 @@ test("addReviewSectionItem stores readable files and feedback", async () => {
 		item?.section.uncovered_scenarios[0]?.text,
 		"No test for an empty input.",
 	);
+});
+
+test("tool calls stay inline between assistant markdown chunks", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+
+	useApp.setState({ chat: [], streaming: false });
+
+	useApp.getState().appendAssistantChunk("I will check");
+	useApp.getState().addToolCallItem({
+		tool_call_id: "tool-1",
+		title: "Search repo",
+		kind: "search",
+		status: "in_progress",
+	});
+	useApp.getState().appendAssistantChunk(" and explain.");
+
+	const [message] = useApp.getState().chat as ChatMessage[];
+	assert.equal(useApp.getState().chat.length, 1);
+	assert.equal(message?.role, "assistant");
+	assert.equal(message?.text, "I will check and explain.");
+	assert.deepEqual(message?.parts, [
+		{ type: "markdown", text: "I will check" },
+		{
+			type: "tool_call",
+			toolCall: {
+				tool_call_id: "tool-1",
+				title: "Search repo",
+				kind: "search",
+				status: "in_progress",
+			},
+		},
+		{ type: "markdown", text: " and explain." },
+	]);
+});
+
+test("replayed assistant chunks dedupe after inline tool calls", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+
+	useApp.setState({ chat: [], streaming: false });
+
+	useApp.getState().appendAssistantChunk("I will check");
+	useApp.getState().addToolCallItem({
+		tool_call_id: "tool-1",
+		title: "Search repo",
+		kind: "search",
+		status: "completed",
+	});
+	useApp.getState().appendAssistantChunk("I will check and explain.");
+
+	const [message] = useApp.getState().chat as ChatMessage[];
+	assert.equal(message?.text, "I will check and explain.");
+	assert.deepEqual(message?.parts, [
+		{ type: "markdown", text: "I will check" },
+		{
+			type: "tool_call",
+			toolCall: {
+				tool_call_id: "tool-1",
+				title: "Search repo",
+				kind: "search",
+				status: "completed",
+			},
+		},
+		{ type: "markdown", text: " and explain." },
+	]);
+});
+
+test("inline tool call statuses update inside assistant message parts", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+
+	useApp.setState({ chat: [], streaming: false });
+
+	useApp.getState().appendAssistantChunk("Checking");
+	useApp.getState().addToolCallItem({
+		tool_call_id: "tool-1",
+		title: "Search repo",
+		kind: "search",
+		status: "in_progress",
+	});
+	useApp.getState().updateToolCallItem("tool-1", "completed");
+
+	const [message] = useApp.getState().chat as ChatMessage[];
+	assert.deepEqual(message?.parts?.[1], {
+		type: "tool_call",
+		toolCall: {
+			tool_call_id: "tool-1",
+			title: "Search repo",
+			kind: "search",
+			status: "completed",
+		},
+	});
 });
 
 test("appendAssistantChunk hides structured review fences from chat text", async () => {
@@ -394,7 +578,41 @@ test("structured review fences split around a readable item stay hidden", async 
 	assert(!chat.some((message) => message.text.includes("Release metadata")));
 });
 
-test("applyCommentResult stores published URL for matching draft", async () => {
+test("dismissCommentDraft removes the matching draft only", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+
+	useApp.setState({
+		commentDrafts: [
+			{
+				id: "draft-123",
+				status: "publishing",
+				draft: {
+					kind: "top_level",
+					body: "Looks good.",
+				},
+			},
+			{
+				id: "draft-456",
+				status: "pending",
+				draft: {
+					kind: "top_level",
+					body: "Keep this one.",
+				},
+			},
+		],
+	});
+
+	useApp.getState().dismissCommentDraft("draft-123");
+
+	assert.deepEqual(
+		useApp
+			.getState()
+			.commentDrafts.map((draft: { id: string }) => draft.id),
+		["draft-456"],
+	);
+});
+
+test("applyCommentResult removes published drafts", async () => {
 	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
 
 	useApp.setState({
@@ -416,18 +634,10 @@ test("applyCommentResult stores published URL for matching draft", async () => {
 		url: "https://github.com/garden-co/jazz/pull/787#discussion_r1",
 	});
 
-	assert.deepEqual(useApp.getState().commentDrafts[0], {
-		id: "draft-123",
-		status: "published",
-		url: "https://github.com/garden-co/jazz/pull/787#discussion_r1",
-		draft: {
-			kind: "top_level",
-			body: "Looks good.",
-		},
-	});
+	assert.deepEqual(useApp.getState().commentDrafts, []);
 });
 
-test("applyCommentResult stores failure message for matching draft", async () => {
+test("applyCommentResult removes failed drafts", async () => {
 	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
 
 	useApp.setState({
@@ -452,9 +662,5 @@ test("applyCommentResult stores failure message for matching draft", async () =>
 		error: "GitHub rejected the comment.",
 	});
 
-	assert.equal(useApp.getState().commentDrafts[0]?.status, "error");
-	assert.equal(
-		useApp.getState().commentDrafts[0]?.error,
-		"GitHub rejected the comment.",
-	);
+	assert.deepEqual(useApp.getState().commentDrafts, []);
 });
