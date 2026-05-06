@@ -108,6 +108,7 @@ async function resetReviewState() {
 		diffFocus: null,
 		diffFocusError: null,
 		pendingDiffReferences: [],
+		expandedFiles: {},
 	});
 }
 
@@ -663,4 +664,54 @@ test("applyCommentResult removes failed drafts", async () => {
 	});
 
 	assert.deepEqual(useApp.getState().commentDrafts, []);
+});
+
+test("toggleFileExpanded flips a single file's expansion state", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().toggleFileExpanded("src/a.ts");
+	assert.equal(useApp.getState().expandedFiles["src/a.ts"], true);
+
+	useApp.getState().toggleFileExpanded("src/a.ts");
+	assert.equal(useApp.getState().expandedFiles["src/a.ts"], undefined);
+});
+
+test("expandFile is idempotent and only expands the one file", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().expandFile("src/a.ts");
+	const after = useApp.getState().expandedFiles;
+	useApp.getState().expandFile("src/a.ts");
+
+	assert.deepEqual(useApp.getState().expandedFiles, { "src/a.ts": true });
+	assert.equal(useApp.getState().expandedFiles, after);
+});
+
+test("expandFiles and collapseAllFiles operate on the full set", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().expandFiles(["src/a.ts", "src/b.ts", "src/c.ts"]);
+	assert.deepEqual(useApp.getState().expandedFiles, {
+		"src/a.ts": true,
+		"src/b.ts": true,
+		"src/c.ts": true,
+	});
+
+	useApp.getState().collapseAllFiles();
+	assert.deepEqual(useApp.getState().expandedFiles, {});
+});
+
+test("expanded files survive section changes but are cleared by reset", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().expandFile("src/a.ts");
+	useApp.getState().setCurrentSection("section-2");
+	assert.deepEqual(useApp.getState().expandedFiles, { "src/a.ts": true });
+
+	useApp.getState().reset();
+	assert.deepEqual(useApp.getState().expandedFiles, {});
 });

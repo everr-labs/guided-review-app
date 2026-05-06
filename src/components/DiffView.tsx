@@ -1,7 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import type { DiffLineAnnotation, SelectedLineRange } from "@pierre/diffs";
-import { LocateFixed } from "lucide-react";
+import {
+	ChevronDown,
+	ChevronRight,
+	LocateFixed,
+	MessageSquare,
+	Sparkles,
+} from "lucide-react";
 import { useApp } from "@/lib/store";
 import { acp } from "@/lib/acp";
 import { SeverityBadge } from "./SeverityBadge";
@@ -23,6 +29,10 @@ import {
 	type SectionFeedbackAnnotationMetadata,
 	type SectionFeedbackNote,
 } from "@/lib/sectionFeedback";
+import {
+	computeFileDiffStats,
+	type FileDiffStats,
+} from "@/lib/diffStats";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { stripMarkdownForSummary } from "@/lib/markdownContent";
 
@@ -155,9 +165,11 @@ function SectionNotesPanel({ notes }: { notes: SectionFeedbackNote[] }) {
 
 function DiffFileCard({
 	bundle,
+	stats,
 	sectionFeedbackAnnotations,
 }: {
 	bundle: FileBundle;
+	stats: FileDiffStats;
 	sectionFeedbackAnnotations: DiffLineAnnotation<SectionFeedbackAnnotationMetadata>[];
 }) {
 	const agentFocus = useApp((s) =>
@@ -167,6 +179,8 @@ function DiffFileCard({
 	);
 	const pendingDiffReferences = useApp((s) => s.pendingDiffReferences);
 	const publishedComments = useApp((s) => s.publishedComments);
+	const expanded = useApp((s) => Boolean(s.expandedFiles[bundle.file_path]));
+	const toggleFileExpanded = useApp((s) => s.toggleFileExpanded);
 
 	const pendingForFile = useMemo(
 		() =>
@@ -264,22 +278,64 @@ function DiffFileCard({
 		[onLineSelected],
 	);
 
+	const noteCount = lineAnnotations.length;
+	const hasAgentNotes = sectionFeedbackAnnotations.some(
+		(annotation) => annotation.metadata.file_path === bundle.file_path,
+	);
+	const ChevronIcon = expanded ? ChevronDown : ChevronRight;
+
 	return (
 		<div
 			data-file-path={bundle.file_path}
+			data-expanded={expanded ? "true" : "false"}
 			className="relative overflow-hidden rounded-md border border-border bg-card"
 		>
-			<div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5 font-mono text-xs">
+			<button
+				type="button"
+				onClick={() => toggleFileExpanded(bundle.file_path)}
+				aria-expanded={expanded}
+				aria-controls={`diff-file-${bundle.file_path}`}
+				className="flex w-full items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5 text-left font-mono text-xs hover:bg-muted/70 focus:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+			>
+				<ChevronIcon className="size-3.5 shrink-0 text-muted-foreground" />
 				<span className="truncate">{bundle.file_path}</span>
-			</div>
-			<MultiFileDiff
-				oldFile={oldFile}
-				newFile={newFile}
-				options={options}
-				lineAnnotations={lineAnnotations}
-				selectedLines={selectedLines}
-				renderAnnotation={renderAnnotation}
-			/>
+				<span className="ml-auto flex shrink-0 items-center gap-2 text-[10px]">
+					<span className="font-mono tabular-nums">
+						<span className="text-[oklch(0.78_0.16_155)]">
+							+{stats.additions}
+						</span>
+						<span className="ml-1 text-[oklch(0.7_0.18_25)]">
+							−{stats.deletions}
+						</span>
+					</span>
+					{noteCount > 0 && (
+						<span className="inline-flex items-center gap-0.5 rounded border border-border/60 bg-background/60 px-1 py-0.5 text-muted-foreground">
+							<MessageSquare className="size-3" />
+							<span className="tabular-nums">{noteCount}</span>
+						</span>
+					)}
+					{hasAgentNotes && (
+						<span
+							title="Reviewed by the agent"
+							className="inline-flex items-center text-primary"
+						>
+							<Sparkles className="size-3" />
+						</span>
+					)}
+				</span>
+			</button>
+			{expanded && (
+				<div id={`diff-file-${bundle.file_path}`}>
+					<MultiFileDiff
+						oldFile={oldFile}
+						newFile={newFile}
+						options={options}
+						lineAnnotations={lineAnnotations}
+						selectedLines={selectedLines}
+						renderAnnotation={renderAnnotation}
+					/>
+				</div>
+			)}
 		</div>
 	);
 }
@@ -292,6 +348,10 @@ export function DiffPane() {
 	const diffFocusError = useApp((s) => s.diffFocusError);
 	const clearDiffFocus = useApp((s) => s.clearDiffFocus);
 	const setDiffFocusError = useApp((s) => s.setDiffFocusError);
+	const expandFile = useApp((s) => s.expandFile);
+	const expandFiles = useApp((s) => s.expandFiles);
+	const collapseAllFiles = useApp((s) => s.collapseAllFiles);
+	const publishedComments = useApp((s) => s.publishedComments);
 
 	const current = useMemo(
 		() => sections.find((s) => s.id === currentId) ?? null,
@@ -308,6 +368,16 @@ export function DiffPane() {
 		() => new Set(bundles.map((bundle) => bundle.file_path)),
 		[bundles],
 	);
+	const fileStats = useMemo(() => {
+		const map = new Map<string, FileDiffStats>();
+		for (const bundle of bundles) {
+			map.set(
+				bundle.file_path,
+				computeFileDiffStats(bundle.file_path, bundle.oldText, bundle.newText),
+			);
+		}
+		return map;
+	}, [bundles]);
 	const sectionFeedbackAnnotations = useMemo(
 		() =>
 			section
@@ -337,6 +407,80 @@ export function DiffPane() {
 		const timeout = window.setTimeout(() => setAgentFocusLabel(null), 4500);
 		return () => window.clearTimeout(timeout);
 	}, [diffFocus]);
+
+	useEffect(() => {
+		if (!diffFocus) return;
+		if (!visibleFilePaths.has(diffFocus.file_path)) return;
+		expandFile(diffFocus.file_path);
+	}, [diffFocus, visibleFilePaths, expandFile]);
+
+	const filesWithNotes = useMemo(() => {
+		const set = new Set<string>();
+		for (const comment of publishedComments) {
+			const path = comment.file_path;
+			if (!path || !visibleFilePaths.has(path)) continue;
+			const line = comment.line ?? comment.original_line;
+			const side = comment.side ?? comment.original_side;
+			if (!line || !side) continue;
+			set.add(path);
+		}
+		for (const annotation of sectionFeedbackAnnotations) {
+			if (visibleFilePaths.has(annotation.metadata.file_path)) {
+				set.add(annotation.metadata.file_path);
+			}
+		}
+		return [...set];
+	}, [publishedComments, sectionFeedbackAnnotations, visibleFilePaths]);
+
+	const autoExpandedSectionsRef = useRef<Set<string>>(new Set());
+	const sectionId = section?.section_id ?? null;
+	useEffect(() => {
+		if (!sectionId) return;
+		if (bundles.length === 0) return;
+		if (autoExpandedSectionsRef.current.has(sectionId)) return;
+		autoExpandedSectionsRef.current.add(sectionId);
+		if (filesWithNotes.length > 0) {
+			expandFiles(filesWithNotes);
+		}
+	}, [sectionId, bundles, filesWithNotes, expandFiles]);
+
+	const allFilePaths = useMemo(
+		() => bundles.map((bundle) => bundle.file_path),
+		[bundles],
+	);
+	const expandAll = useCallback(
+		() => expandFiles(allFilePaths),
+		[expandFiles, allFilePaths],
+	);
+	const collapseAll = useCallback(
+		() => collapseAllFiles(),
+		[collapseAllFiles],
+	);
+
+	useEffect(() => {
+		if (allFilePaths.length === 0) return;
+		const onKey = (event: KeyboardEvent) => {
+			if (event.metaKey || event.ctrlKey || event.altKey) return;
+			const target = event.target as HTMLElement | null;
+			if (
+				target &&
+				(target.tagName === "INPUT" ||
+					target.tagName === "TEXTAREA" ||
+					target.isContentEditable)
+			) {
+				return;
+			}
+			if (event.key === "c") {
+				event.preventDefault();
+				collapseAll();
+			} else if (event.key === "e") {
+				event.preventDefault();
+				expandAll();
+			}
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [allFilePaths, collapseAll, expandAll]);
 
 	useEffect(() => {
 		if (!diffFocus || loading || loadError) return;
@@ -520,10 +664,42 @@ export function DiffPane() {
 						No textual changes in the listed files.
 					</div>
 				)}
+				{!loading && !loadError && bundles.length > 0 && (
+					<div className="flex items-center gap-2 text-xs">
+						<button
+							type="button"
+							onClick={expandAll}
+							className="rounded border border-border bg-card/60 px-2 py-1 text-muted-foreground hover:bg-muted/60"
+							title="Expand all files (e)"
+						>
+							Expand all
+							<kbd className="ml-1.5 rounded border border-border/70 bg-background px-1 py-px font-mono text-[10px]">
+								e
+							</kbd>
+						</button>
+						<button
+							type="button"
+							onClick={collapseAll}
+							className="rounded border border-border bg-card/60 px-2 py-1 text-muted-foreground hover:bg-muted/60"
+							title="Collapse all files (c)"
+						>
+							Collapse all
+							<kbd className="ml-1.5 rounded border border-border/70 bg-background px-1 py-px font-mono text-[10px]">
+								c
+							</kbd>
+						</button>
+					</div>
+				)}
 				{bundles.map((b) => (
 					<DiffFileCard
 						key={b.file_path}
 						bundle={b}
+						stats={
+							fileStats.get(b.file_path) ?? {
+								additions: 0,
+								deletions: 0,
+							}
+						}
 						sectionFeedbackAnnotations={sectionFeedbackAnnotations}
 					/>
 				))}

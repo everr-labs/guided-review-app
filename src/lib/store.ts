@@ -98,6 +98,7 @@ interface AppState {
 	diffFocus: DiffFocusRange | null;
 	diffFocusError: string | null;
 	pendingDiffReferences: DiffFocusRange[];
+	expandedFiles: Record<string, true>;
 
 	setProject: (p: LocalProject | null) => void;
 	setSession: (s: SessionInfo | null) => void;
@@ -138,6 +139,11 @@ interface AppState {
 	addPendingDiffReference: (range: DiffFocusRange) => void;
 	removePendingDiffReference: (id: string) => void;
 	clearPendingDiffReferences: () => void;
+
+	toggleFileExpanded: (filePath: string) => void;
+	expandFile: (filePath: string) => void;
+	expandFiles: (filePaths: string[]) => void;
+	collapseAllFiles: () => void;
 }
 
 const LS_KEYS = {
@@ -353,6 +359,7 @@ export const useApp = create<AppState>((set) => ({
 	diffFocus: null,
 	diffFocusError: null,
 	pendingDiffReferences: [],
+	expandedFiles: {},
 
 	setProject: (p) =>
 		set((state) => {
@@ -385,6 +392,7 @@ export const useApp = create<AppState>((set) => ({
 				diffFocus: null,
 				diffFocusError: null,
 				pendingDiffReferences: [],
+				expandedFiles: {},
 			};
 		}),
 
@@ -409,6 +417,7 @@ export const useApp = create<AppState>((set) => ({
 			publishedCommentsFetchedAt: s ? Date.now() : null,
 			publishedCommentsError: s?.published_comments_error ?? null,
 			pendingDiffReferences: [],
+			expandedFiles: {},
 		});
 	},
 	reset: () =>
@@ -435,6 +444,7 @@ export const useApp = create<AppState>((set) => ({
 				diffFocus: null,
 				diffFocusError: null,
 				pendingDiffReferences: [],
+				expandedFiles: {},
 			};
 		}),
 
@@ -821,4 +831,37 @@ export const useApp = create<AppState>((set) => ({
 			),
 		})),
 	clearPendingDiffReferences: () => set({ pendingDiffReferences: [] }),
+
+	toggleFileExpanded: (filePath) =>
+		set((state) => {
+			const next = { ...state.expandedFiles };
+			if (next[filePath]) delete next[filePath];
+			else next[filePath] = true;
+			return { expandedFiles: next };
+		}),
+	expandFile: (filePath) =>
+		set((state) =>
+			state.expandedFiles[filePath]
+				? {}
+				: { expandedFiles: { ...state.expandedFiles, [filePath]: true } },
+		),
+	expandFiles: (filePaths) =>
+		set((state) => {
+			if (filePaths.length === 0) return {};
+			const next = { ...state.expandedFiles };
+			let changed = false;
+			for (const path of filePaths) {
+				if (!next[path]) {
+					next[path] = true;
+					changed = true;
+				}
+			}
+			return changed ? { expandedFiles: next } : {};
+		}),
+	collapseAllFiles: () =>
+		set((state) =>
+			Object.keys(state.expandedFiles).length === 0
+				? {}
+				: { expandedFiles: {} },
+		),
 }));
