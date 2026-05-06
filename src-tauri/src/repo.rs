@@ -115,11 +115,7 @@ pub async fn resolve_source(source: &SessionSource) -> Result<ClonedRepo> {
             clone_or_fetch(repo_url, &RefSpec::Sha(sha.clone())).await
         }
         SessionSource::Local { path } => prepare_local(path).await,
-        SessionSource::LocalPr {
-            path,
-            repo_url,
-            number,
-        } => prepare_local_pr(path, repo_url, *number).await,
+        SessionSource::LocalPr { path, number, .. } => prepare_local_pr(path, *number).await,
         SessionSource::LocalBranch { path, branch } => prepare_local_branch(path, branch).await,
     }
 }
@@ -165,7 +161,7 @@ async fn prepare_local(path: &Path) -> Result<ClonedRepo> {
     })
 }
 
-async fn prepare_local_pr(path: &Path, repo_url: &str, number: u64) -> Result<ClonedRepo> {
+async fn prepare_local_pr(path: &Path, number: u64) -> Result<ClonedRepo> {
     if !path.is_dir() {
         return Err(anyhow!("not a directory: {}", path.display()));
     }
@@ -173,7 +169,7 @@ async fn prepare_local_pr(path: &Path, repo_url: &str, number: u64) -> Result<Cl
     let _ = run_git(Some(path), &["fetch", "--all", "--prune"]).await;
     let head_ref = format!("guided-review-pr-{number}");
     let pr_refspec = format!("+refs/pull/{number}/head:{head_ref}");
-    run_git(Some(path), &["fetch", repo_url, &pr_refspec]).await?;
+    run_git(Some(path), &["fetch", "origin", &pr_refspec]).await?;
     let head_sha = resolve_commit_sha(path, &head_ref).await?;
     let base_ref = resolve_local_base_ref(path, &head_ref).await?;
 
@@ -648,5 +644,50 @@ mod tests {
         assert_eq!(json["head_sha"], feature_sha);
 
         fs::remove_dir_all(repo_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepare_local_pr_fetches_from_origin_not_an_explicit_url() {
+        let remote_path = temp_repo_path("pr-origin-remote");
+        let local_path = temp_repo_path("pr-origin-local");
+        fs::create_dir_all(&remote_path).unwrap();
+
+        run_git_sync(&remote_path, &["init", "-b", "main"]);
+        run_git_sync(&remote_path, &["config", "user.name", "Guided Review Test"]);
+        run_git_sync(
+            &remote_path,
+            &["config", "user.email", "guided-review-test@example.com"],
+        );
+        write_and_commit(&remote_path, "README.md", "base\n", "base");
+        run_git_sync(&remote_path, &["checkout", "-b", "feature"]);
+        write_and_commit(&remote_path, "README.md", "pr\n", "pr");
+        let pr_sha = git_output_sync(&remote_path, &["rev-parse", "feature"]);
+        run_git_sync(
+            &remote_path,
+            &["update-ref", "refs/pull/391/head", &pr_sha],
+        );
+        run_git_sync(&remote_path, &["checkout", "main"]);
+
+        run_git_sync(
+            Path::new("."),
+            &[
+                "clone",
+                &remote_path.to_string_lossy(),
+                &local_path.to_string_lossy(),
+            ],
+        );
+        run_git_sync(&local_path, &["config", "user.name", "Guided Review Test"]);
+        run_git_sync(
+            &local_path,
+            &["config", "user.email", "guided-review-test@example.com"],
+        );
+
+        let prepared = prepare_local_pr(&local_path, 391).await.unwrap();
+
+        assert_eq!(prepared.head_ref, "guided-review-pr-391");
+        assert_eq!(prepared.head_sha, pr_sha);
+
+        fs::remove_dir_all(&remote_path).unwrap();
+        fs::remove_dir_all(&local_path).unwrap();
     }
 }
