@@ -58,12 +58,40 @@ The selected folder's `origin` remote is used as the repository source. If you p
 
 ```sh
 npm run check
+npm test
 npm run build
 npm run tauri -- build
-npx tsx --test "src/**/*.test.ts"
+npm run bump-version -- patch
+npm run release:local
 ```
 
-`npm run check` runs TypeScript checks. `npm run build` builds the frontend. `npm run tauri -- build` builds the desktop app.
+`npm run check` runs TypeScript checks. `npm test` runs the unit tests. `npm run build` builds the frontend. `npm run tauri -- build` builds the desktop app. `npm run bump-version -- patch` bumps the app version across npm, Tauri, and Cargo metadata. You can also pass `minor`, `major`, or an exact version like `1.2.3`. `npm run release:local` loads Apple release values from `.env`, builds a signed universal macOS app, and publishes the generated assets with the GitHub CLI.
+
+For a local release build, copy `.env.example` to `.env`, fill in the Apple values, then run:
+
+```sh
+npm run release:local
+```
+
+For local builds, prefer the Developer ID Application certificate already installed in Keychain. Find the exact signing identity with:
+
+```sh
+security find-identity -v -p codesigning
+```
+
+Then set `APPLE_SIGNING_IDENTITY` in `.env`, for example:
+
+```sh
+APPLE_SIGNING_IDENTITY=Developer ID Application: Your Name (TEAMID)
+```
+
+The local release command uses these GitHub defaults:
+
+- tag: `guided-review-v<package.json version>`
+- title: `Guided Review v<package.json version>`
+- notes: `Signed and notarized macOS build. Download the app from the assets below.`
+
+Set `GH_REPO=owner/repo` in `.env` if the local Git remote is not the release target. Set `RELEASE_DRAFT=true` or `RELEASE_PRERELEASE=true` if needed. If the release already exists, the script uploads the new assets with `--clobber`.
 
 ## Release Workflow
 

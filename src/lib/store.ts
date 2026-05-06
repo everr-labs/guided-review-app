@@ -12,6 +12,7 @@ import type {
 import type { ClonedRepo, PullRequestMetadata, SessionSource } from "./acp";
 import type { LocalProject } from "./projectSource";
 import { clearLastProjectPath, saveLastProjectPath } from "./projectSource";
+import type { DiffFocusRange } from "./diffFocus";
 import { recordClientTelemetry, truncateTelemetryText } from "./telemetry";
 
 export interface SessionInfo {
@@ -71,6 +72,9 @@ interface AppState {
 	stderr: string[];
 	chatVisible: boolean;
 	structuredReviewBlockOpen: boolean;
+	diffFocus: DiffFocusRange | null;
+	diffFocusError: string | null;
+	pendingDiffReferences: DiffFocusRange[];
 
 	setProject: (p: LocalProject | null) => void;
 	setSession: (s: SessionInfo | null) => void;
@@ -100,6 +104,13 @@ interface AppState {
 	setStreaming: (s: boolean) => void;
 
 	toggleChat: () => void;
+
+	setDiffFocus: (range: DiffFocusRange | null) => void;
+	clearDiffFocus: (id?: string) => void;
+	setDiffFocusError: (error: string | null) => void;
+	addPendingDiffReference: (range: DiffFocusRange) => void;
+	removePendingDiffReference: (id: string) => void;
+	clearPendingDiffReferences: () => void;
 }
 
 const LS_KEYS = {
@@ -277,6 +288,9 @@ export const useApp = create<AppState>((set) => ({
 	stderr: [],
 	chatVisible: loadBool(LS_KEYS.chatVisible, true),
 	structuredReviewBlockOpen: false,
+	diffFocus: null,
+	diffFocusError: null,
+	pendingDiffReferences: [],
 
 	setProject: (p) =>
 		set((state) => {
@@ -302,6 +316,9 @@ export const useApp = create<AppState>((set) => ({
 				commentDrafts: [],
 				streaming: false,
 				structuredReviewBlockOpen: false,
+				diffFocus: null,
+				diffFocusError: null,
+				pendingDiffReferences: [],
 			};
 		}),
 
@@ -339,6 +356,9 @@ export const useApp = create<AppState>((set) => ({
 				commentDrafts: [],
 				streaming: false,
 				structuredReviewBlockOpen: false,
+				diffFocus: null,
+				diffFocusError: null,
+				pendingDiffReferences: [],
 			};
 		}),
 
@@ -661,4 +681,34 @@ export const useApp = create<AppState>((set) => ({
 			return { chatVisible: next };
 		}),
 
+	setDiffFocus: (range) =>
+		set((state) => {
+			recordClientTelemetry("client.store.diff_focus.set", {
+				"acp.session_id": state.session?.session_id,
+				"focus.file_path": range?.file_path,
+				"focus.start_line": range?.start_line,
+				"focus.end_line": range?.end_line,
+				"focus.side": range?.side,
+				"focus.source": range?.source,
+				"focus.mode": range?.mode,
+			});
+			return { diffFocus: range, diffFocusError: null };
+		}),
+	clearDiffFocus: (id) =>
+		set((state) => {
+			if (id && state.diffFocus?.id !== id) return {};
+			return { diffFocus: null };
+		}),
+	setDiffFocusError: (error) => set({ diffFocusError: error }),
+	addPendingDiffReference: (range) =>
+		set((state) => ({
+			pendingDiffReferences: [...state.pendingDiffReferences, range],
+		})),
+	removePendingDiffReference: (id) =>
+		set((state) => ({
+			pendingDiffReferences: state.pendingDiffReferences.filter(
+				(r) => r.id !== id,
+			),
+		})),
+	clearPendingDiffReferences: () => set({ pendingDiffReferences: [] }),
 }));

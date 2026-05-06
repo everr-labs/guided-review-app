@@ -12,8 +12,13 @@ import {
 	LoaderCircle,
 	Map,
 	Wrench,
+	X,
 } from "lucide-react";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
+import {
+	formatDiffReferenceForMessage,
+	formatDiffReferenceLabel,
+} from "@/lib/diffFocus";
 import type { ChatItem, Concern } from "@/lib/types/section";
 
 function FeedbackList({ title, concerns }: { title: string; concerns: Concern[] }) {
@@ -151,6 +156,13 @@ export function ChatPanel() {
 	const processingSectionId = useApp((s) => s.processingSectionId);
 	const addUserMessage = useApp((s) => s.addUserMessage);
 	const pushError = useApp((s) => s.pushError);
+	const pendingDiffReferences = useApp((s) => s.pendingDiffReferences);
+	const removePendingDiffReference = useApp(
+		(s) => s.removePendingDiffReference,
+	);
+	const clearPendingDiffReferences = useApp(
+		(s) => s.clearPendingDiffReferences,
+	);
 
 	const [input, setInput] = useState("");
 	const scrollerRef = useRef<HTMLDivElement>(null);
@@ -165,30 +177,37 @@ export function ChatPanel() {
 				scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
 		}
 	});
-	}, [chat, drafts, streaming]);
+	}, [chat, drafts, streaming, pendingDiffReferences]);
 
 	async function send() {
+		if (!session) return;
 		const text = input.trim();
-		if (!text || !session) return;
+		if (!text && pendingDiffReferences.length === 0) return;
+		const refs = pendingDiffReferences
+			.map((r) => formatDiffReferenceForMessage(r))
+			.join("\n");
+		const body = refs ? (text ? `${refs}\n\n${text}` : refs) : text;
 		recordClientTelemetry("client.chat.send.requested", {
 			"acp.session_id": session.session_id,
-			"message.length": text.length,
+			"message.length": body.length,
+			"context.count": pendingDiffReferences.length,
 		});
 		setInput("");
-		addUserMessage(text);
+		addUserMessage(body);
+		clearPendingDiffReferences();
 		try {
-			await acp.sendMessage(session.session_id, text, {
+			await acp.sendMessage(session.session_id, body, {
 				origin: "chat_panel_user_send",
 				reason: "user_reply",
 			});
 			recordClientTelemetry("client.chat.send.succeeded", {
 				"acp.session_id": session.session_id,
-				"message.length": text.length,
+				"message.length": body.length,
 			});
 		} catch (e) {
 			recordClientTelemetryError("client.chat.send.failed", e, {
 				"acp.session_id": session.session_id,
-				"message.length": text.length,
+				"message.length": body.length,
 			});
 			pushError(`send_message failed: ${e}`);
 		}
@@ -281,6 +300,26 @@ export function ChatPanel() {
 						</span>
 					</div>
 				)}
+				{pendingDiffReferences.length > 0 && (
+					<div className="flex flex-wrap gap-1.5">
+						{pendingDiffReferences.map((c) => (
+							<span
+								key={c.id}
+								className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-2 py-0.5 font-mono text-[10px]"
+							>
+								{formatDiffReferenceLabel(c)}
+								<button
+									type="button"
+									className="text-muted-foreground hover:text-foreground"
+									onClick={() => removePendingDiffReference(c.id)}
+									aria-label="Remove reference"
+								>
+									<X className="size-3" />
+								</button>
+							</span>
+						))}
+					</div>
+				)}
 				<Textarea
 					ref={textareaRef}
 					value={input}
@@ -298,7 +337,10 @@ export function ChatPanel() {
 					<Button
 						size="sm"
 						onClick={send}
-						disabled={!session || !input.trim()}
+						disabled={
+							!session ||
+							(!input.trim() && pendingDiffReferences.length === 0)
+						}
 					>
 						Send
 					</Button>

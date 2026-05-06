@@ -1,48 +1,28 @@
-import { useEffect, useMemo, useState } from "react";
-import { DiffModeEnum, DiffView } from "@git-diff-view/react";
-import "@git-diff-view/react/styles/diff-view.css";
-import { createPatch } from "diff";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { MultiFileDiff } from "@pierre/diffs/react";
+import type { SelectedLineRange } from "@pierre/diffs";
+import { LocateFixed, X } from "lucide-react";
 import { useApp } from "@/lib/store";
 import { acp } from "@/lib/acp";
 import { SeverityBadge } from "./SeverityBadge";
+import { Button } from "@/components/ui/button";
+import {
+	createDiffFocusRange,
+	focusSideToPierreSide,
+	formatDiffFocusHeader,
+	formatDiffReferenceLabel,
+	pierreSideToFocusSide,
+	type DiffFocusRange,
+} from "@/lib/diffFocus";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
 
 interface FileBundle {
 	file_path: string;
 	oldText: string;
 	newText: string;
-	patch: string;
 }
 
 const fileCache = new Map<string, string>();
-
-function langFor(filePath: string): string {
-	const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
-	const map: Record<string, string> = {
-		ts: "typescript",
-		tsx: "tsx",
-		js: "javascript",
-		jsx: "jsx",
-		py: "python",
-		rs: "rust",
-		go: "go",
-		java: "java",
-		kt: "kotlin",
-		rb: "ruby",
-		md: "markdown",
-		json: "json",
-		yml: "yaml",
-		yaml: "yaml",
-		toml: "toml",
-		sh: "bash",
-		css: "css",
-		scss: "scss",
-		html: "html",
-		svelte: "svelte",
-		sql: "sql",
-	};
-	return map[ext] ?? "plaintext";
-}
 
 async function fetchFile(
 	repoPath: string,
@@ -62,34 +42,143 @@ async function fetchFile(
 	return text;
 }
 
+function pierreRangeToFocus(
+	range: SelectedLineRange,
+	filePath: string,
+): DiffFocusRange | null {
+	const endSide = range.endSide ?? range.side;
+	if (!endSide) return null;
+	return createDiffFocusRange({
+		file_path: filePath,
+		start_line: range.start,
+		end_line: range.end,
+		side: pierreSideToFocusSide(endSide),
+		source: "user",
+		mode: "draft-reference",
+	});
+}
+
 function DiffFileCard({ bundle }: { bundle: FileBundle }) {
+	const focus = useApp((s) =>
+		s.diffFocus?.file_path === bundle.file_path ? s.diffFocus : null,
+	);
+
+	const oldFile = useMemo(
+		() => ({ name: bundle.file_path, contents: bundle.oldText }),
+		[bundle.file_path, bundle.oldText],
+	);
+	const newFile = useMemo(
+		() => ({ name: bundle.file_path, contents: bundle.newText }),
+		[bundle.file_path, bundle.newText],
+	);
+
+	const selectedLines: SelectedLineRange | null = useMemo(() => {
+		if (!focus) return null;
+		const side = focusSideToPierreSide(focus.side);
+		return {
+			start: focus.start_line,
+			end: focus.end_line,
+			side,
+			endSide: side,
+		};
+	}, [focus]);
+
+	const onLineSelected = useCallback(
+		(range: SelectedLineRange | null) => {
+			const { diffFocus, setDiffFocus, clearDiffFocus } = useApp.getState();
+			const currentFocus =
+				diffFocus?.file_path === bundle.file_path ? diffFocus : null;
+			if (!range) {
+				if (currentFocus) {
+					recordClientTelemetry("client.diff.focus.cleared", {
+						"file.path": currentFocus.file_path,
+						"line.start": currentFocus.start_line,
+						"line.end": currentFocus.end_line,
+						"line.side": currentFocus.side,
+					});
+				}
+				clearDiffFocus(currentFocus?.id);
+				return;
+			}
+			const next = pierreRangeToFocus(range, bundle.file_path);
+			if (!next) return;
+			recordClientTelemetry("client.diff.focus.selected", {
+				"file.path": next.file_path,
+				"line.start": next.start_line,
+				"line.end": next.end_line,
+				"line.side": next.side,
+			});
+			setDiffFocus(next);
+		},
+		[bundle.file_path],
+	);
+
+	const options = useMemo(
+		() => ({
+			theme: "pierre-dark" as const,
+			diffStyle: "unified" as const,
+			enableLineSelection: true,
+			onLineSelected,
+		}),
+		[onLineSelected],
+	);
+
+	const addReference = useCallback(() => {
+		const { diffFocus, addPendingDiffReference, clearDiffFocus } =
+			useApp.getState();
+		if (!diffFocus || diffFocus.file_path !== bundle.file_path) return;
+		addPendingDiffReference(diffFocus);
+		recordClientTelemetry("client.diff.focus.reference_added", {
+			"file.path": diffFocus.file_path,
+			"line.start": diffFocus.start_line,
+			"line.end": diffFocus.end_line,
+			"line.side": diffFocus.side,
+		});
+		clearDiffFocus(diffFocus.id);
+	}, [bundle.file_path]);
+
+	const clearSelection = useCallback(() => {
+		const { diffFocus, clearDiffFocus } = useApp.getState();
+		if (!diffFocus || diffFocus.file_path !== bundle.file_path) return;
+		recordClientTelemetry("client.diff.focus.cleared", {
+			"file.path": diffFocus.file_path,
+			"line.start": diffFocus.start_line,
+			"line.end": diffFocus.end_line,
+			"line.side": diffFocus.side,
+		});
+		clearDiffFocus(diffFocus.id);
+	}, [bundle.file_path]);
+
+	const showToolbar =
+		focus?.source === "user" && focus.mode === "draft-reference";
+
 	return (
 		<div
 			data-file-path={bundle.file_path}
 			className="relative overflow-hidden rounded-md border border-border bg-card"
 		>
-			<div className="border-b border-border bg-muted/40 px-3 py-1.5 font-mono text-xs">
-				{bundle.file_path}
+			<div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5 font-mono text-xs">
+				<span className="truncate">{bundle.file_path}</span>
+				{showToolbar && focus && (
+					<div className="ml-auto flex items-center gap-1.5">
+						<span className="text-muted-foreground">
+							{formatDiffReferenceLabel(focus)}
+						</span>
+						<Button size="sm" onClick={addReference}>
+							@Tag
+						</Button>
+						<Button size="sm" variant="outline" onClick={clearSelection}>
+							<X className="size-3.5" />
+							Clear
+						</Button>
+					</div>
+				)}
 			</div>
-			<DiffView
-				data={{
-					oldFile: {
-						fileName: bundle.file_path,
-						fileLang: langFor(bundle.file_path),
-						content: bundle.oldText,
-					},
-					newFile: {
-						fileName: bundle.file_path,
-						fileLang: langFor(bundle.file_path),
-						content: bundle.newText,
-					},
-					hunks: [bundle.patch],
-				}}
-				diffViewMode={DiffModeEnum.Unified}
-				diffViewWrap
-				diffViewTheme="dark"
-				diffViewHighlight
-				diffViewFontSize={12}
+			<MultiFileDiff
+				oldFile={oldFile}
+				newFile={newFile}
+				options={options}
+				selectedLines={selectedLines}
 			/>
 		</div>
 	);
@@ -99,6 +188,10 @@ export function DiffPane() {
 	const session = useApp((s) => s.session);
 	const currentId = useApp((s) => s.currentSectionId);
 	const sections = useApp((s) => s.sections);
+	const diffFocus = useApp((s) => s.diffFocus);
+	const diffFocusError = useApp((s) => s.diffFocusError);
+	const clearDiffFocus = useApp((s) => s.clearDiffFocus);
+	const setDiffFocusError = useApp((s) => s.setDiffFocusError);
 
 	const current = useMemo(
 		() => sections.find((s) => s.id === currentId) ?? null,
@@ -110,6 +203,34 @@ export function DiffPane() {
 	const [bundles, setBundles] = useState<FileBundle[]>([]);
 	const [loading, setLoading] = useState(false);
 	const [loadError, setLoadError] = useState<string | null>(null);
+	const [agentFocusLabel, setAgentFocusLabel] = useState<string | null>(null);
+
+	useEffect(() => {
+		setAgentFocusLabel(null);
+		setDiffFocusError(null);
+		const currentFocus = useApp.getState().diffFocus;
+		if (currentFocus?.source === "user") {
+			clearDiffFocus(currentFocus.id);
+		}
+	}, [currentId, clearDiffFocus, setDiffFocusError]);
+
+	useEffect(() => {
+		if (diffFocus?.source !== "agent") return;
+		const label = formatDiffFocusHeader(diffFocus);
+		setAgentFocusLabel(label);
+		const timeout = window.setTimeout(() => setAgentFocusLabel(null), 4500);
+		return () => window.clearTimeout(timeout);
+	}, [diffFocus]);
+
+	useEffect(() => {
+		if (!diffFocus || loading || loadError) return;
+		const visible = bundles.some((b) => b.file_path === diffFocus.file_path);
+		if (!visible) {
+			setDiffFocusError(
+				`${diffFocus.file_path} is not visible in the current diff section.`,
+			);
+		}
+	}, [bundles, diffFocus, loading, loadError, setDiffFocusError]);
 
 	useEffect(() => {
 		recordClientTelemetry("client.diff.current_section.evaluated", {
@@ -155,14 +276,7 @@ export function DiffPane() {
 						"file.changed": oldText !== newText,
 					});
 					if (oldText === newText) continue;
-					const patch = createPatch(
-						file,
-						oldText,
-						newText,
-						section.base_ref,
-						section.head_ref,
-					);
-					out.push({ file_path: file, oldText, newText, patch });
+					out.push({ file_path: file, oldText, newText });
 				}
 				if (!cancelled) {
 					recordClientTelemetry("client.diff.section_load.succeeded", {
@@ -257,6 +371,12 @@ export function DiffPane() {
 						{section!.head_ref}
 					</span>
 				</div>
+				{agentFocusLabel && (
+					<div className="mt-2 inline-flex items-center gap-1.5 rounded border border-primary/40 bg-primary/10 px-2 py-1 font-mono text-[11px] text-primary">
+						<LocateFixed className="size-3" />
+						{agentFocusLabel}
+					</div>
+				)}
 			</header>
 
 			<div className="flex flex-col gap-4 p-4">
@@ -266,6 +386,11 @@ export function DiffPane() {
 				{loadError && (
 					<div className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive-foreground">
 						{loadError}
+					</div>
+				)}
+				{diffFocusError && (
+					<div className="rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-xs text-primary">
+						{diffFocusError}
 					</div>
 				)}
 				{!loading && !loadError && bundles.length === 0 && (

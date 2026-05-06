@@ -8,11 +8,13 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "check": "tsc --noEmit",
-    "tauri": "tauri"
+    "test": "tsx --test \"src/**/*.test.ts\" && node --test scripts/*.test.mjs",
+    "tauri": "tauri",
+    "bump-version": "node scripts/bump-version.mjs",
+    "release:local": "node scripts/local-release.mjs"
   },
   "license": "MIT",
   "dependencies": {
-    "@git-diff-view/react": "0.1.3",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.216.0",
     "@opentelemetry/exporter-logs-otlp-http": "^0.216.0",
@@ -21,6 +23,7 @@
     "@opentelemetry/sdk-logs": "^0.216.0",
     "@opentelemetry/sdk-trace-web": "^2.7.1",
     "@opentelemetry/semantic-conventions": "^1.40.0",
+    "@pierre/diffs": "^1.1.20",
     "@radix-ui/react-dropdown-menu": "^2.1.6",
     "@radix-ui/react-slot": "^1.1.2",
     "@tauri-apps/api": "^2",
@@ -29,7 +32,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.0.4",
-    "diff": "^9.0.0",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

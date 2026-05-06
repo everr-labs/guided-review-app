@@ -60,6 +60,9 @@ async function resetReviewState() {
 		errors: [],
 		stderr: [],
 		structuredReviewBlockOpen: false,
+		diffFocus: null,
+		diffFocusError: null,
+		pendingDiffReferences: [],
 	});
 }
 

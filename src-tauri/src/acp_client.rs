@@ -1,4 +1,4 @@
-use crate::agent_runner::AgentKind;
+use crate::agent_runner::{prepare_agent_command, AgentKind};
 use crate::events::*;
 use crate::fenced::FencedBuffers;
 use agent_client_protocol::schema::{
@@ -183,25 +183,26 @@ pub async fn start_session(
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<PromptRequestMsg>();
 
     let agent_command = agent_kind.launch_command().to_string();
-    let parts = shell_words::split(&agent_command)
-        .with_context(|| format!("parsing agent command: {agent_command}"))?;
-    if parts.is_empty() {
-        return Err(anyhow!("empty agent command"));
-    }
-    let program = parts[0].clone();
-    let args: Vec<String> = parts[1..].to_vec();
+    let prepared_command = prepare_agent_command(&agent_command)?;
+    let program = prepared_command.program.clone();
 
     let mut cmd = Command::new(&program);
-    cmd.args(&args)
+    cmd.args(&prepared_command.args)
         .current_dir(&cwd)
+        .env("PATH", &prepared_command.path_env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    tracing::info!(
+        agent = ?agent_kind,
+        program = %program.display(),
+        "agent command prepared"
+    );
     scrub_nested_agent_env(&mut cmd);
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("spawning agent {program:?}"))?;
+        .with_context(|| format!("spawning agent {:?}", program.display().to_string()))?;
 
     let child_stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
     let child_stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
