@@ -17,6 +17,12 @@ import {
 	publishedCommentToDiffAnnotation,
 	type PublishedCommentAnnotationMetadata,
 } from "@/lib/publishedComments";
+import {
+	sectionFeedbackToDiffAnnotations,
+	sectionFeedbackTopNotes,
+	type SectionFeedbackAnnotationMetadata,
+	type SectionFeedbackNote,
+} from "@/lib/sectionFeedback";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { stripMarkdownForSummary } from "@/lib/markdownContent";
 
@@ -27,6 +33,10 @@ interface FileBundle {
 }
 
 const fileCache = new Map<string, string>();
+
+type DiffAnnotationMetadata =
+	| PublishedCommentAnnotationMetadata
+	| SectionFeedbackAnnotationMetadata;
 
 async function fetchFile(
 	repoPath: string,
@@ -74,7 +84,82 @@ function focusRangeToPierreSelection(
 	};
 }
 
-function DiffFileCard({ bundle }: { bundle: FileBundle }) {
+function feedbackLocation(note: SectionFeedbackNote): string | null {
+	if (note.file_path && note.line) return `${note.file_path}:${note.line}`;
+	return note.file_path ?? null;
+}
+
+function isSectionFeedbackAnnotation(
+	metadata: DiffAnnotationMetadata,
+): metadata is SectionFeedbackAnnotationMetadata {
+	return "notes" in metadata;
+}
+
+function SectionFeedbackNoteView({
+	note,
+	showLocation = false,
+}: {
+	note: SectionFeedbackNote;
+	showLocation?: boolean;
+}) {
+	const location = showLocation ? feedbackLocation(note) : null;
+	return (
+		<div className="rounded border border-border/70 bg-background/60 px-2 py-1.5 text-xs">
+			<div className="mb-1 flex flex-wrap items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+				{note.severity && <SeverityBadge severity={note.severity} />}
+				<span>{note.label}</span>
+				{location && (
+					<span className="font-mono normal-case tracking-normal">
+						{location}
+					</span>
+				)}
+			</div>
+			<div className="whitespace-pre-wrap text-foreground">{note.text}</div>
+		</div>
+	);
+}
+
+function SectionFeedbackAnnotation({
+	notes,
+}: {
+	notes: SectionFeedbackNote[];
+}) {
+	return (
+		<div className="space-y-1 border-l-2 border-primary bg-primary/10 px-2 py-1.5">
+			{notes.map((note, index) => (
+				<SectionFeedbackNoteView key={index} note={note} />
+			))}
+		</div>
+	);
+}
+
+function SectionNotesPanel({ notes }: { notes: SectionFeedbackNote[] }) {
+	if (notes.length === 0) return null;
+	return (
+		<div className="rounded-md border border-border bg-card/60 px-3 py-2.5">
+			<div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+				Section notes
+			</div>
+			<div className="space-y-2">
+				{notes.map((note, index) => (
+					<SectionFeedbackNoteView
+						key={index}
+						note={note}
+						showLocation
+					/>
+				))}
+			</div>
+		</div>
+	);
+}
+
+function DiffFileCard({
+	bundle,
+	sectionFeedbackAnnotations,
+}: {
+	bundle: FileBundle;
+	sectionFeedbackAnnotations: DiffLineAnnotation<SectionFeedbackAnnotationMetadata>[];
+}) {
 	const agentFocus = useApp((s) =>
 		s.diffFocus?.source === "agent" && s.diffFocus.file_path === bundle.file_path
 			? s.diffFocus
@@ -107,8 +192,8 @@ function DiffFileCard({ bundle }: { bundle: FileBundle }) {
 	}, [pendingForFile, agentFocus]);
 
 	const lineAnnotations = useMemo(
-		(): DiffLineAnnotation<PublishedCommentAnnotationMetadata>[] =>
-			publishedComments
+		(): DiffLineAnnotation<DiffAnnotationMetadata>[] => {
+			const published = publishedComments
 				.filter((comment) => comment.file_path === bundle.file_path)
 				.map(publishedCommentToDiffAnnotation)
 				.filter(
@@ -116,8 +201,13 @@ function DiffFileCard({ bundle }: { bundle: FileBundle }) {
 						annotation,
 					): annotation is DiffLineAnnotation<PublishedCommentAnnotationMetadata> =>
 						annotation !== null,
-				),
-		[publishedComments, bundle.file_path],
+				);
+			const sectionFeedback = sectionFeedbackAnnotations.filter(
+				(annotation) => annotation.metadata.file_path === bundle.file_path,
+			);
+			return [...published, ...sectionFeedback];
+		},
+		[publishedComments, sectionFeedbackAnnotations, bundle.file_path],
 	);
 
 	const onLineSelected = useCallback(
@@ -137,7 +227,12 @@ function DiffFileCard({ bundle }: { bundle: FileBundle }) {
 	);
 
 	const renderAnnotation = useCallback(
-		(annotation: DiffLineAnnotation<PublishedCommentAnnotationMetadata>) => {
+		(annotation: DiffLineAnnotation<DiffAnnotationMetadata>) => {
+			if (isSectionFeedbackAnnotation(annotation.metadata)) {
+				return (
+					<SectionFeedbackAnnotation notes={annotation.metadata.notes} />
+				);
+			}
 			const { comment } = annotation.metadata;
 			return (
 				<div className="border-l-2 border-[oklch(0.7_0.16_155)] bg-[oklch(0.2_0.05_155)]/35 px-2 py-1 text-xs">
@@ -209,6 +304,22 @@ export function DiffPane() {
 	const [loading, setLoading] = useState(false);
 	const [loadError, setLoadError] = useState<string | null>(null);
 	const [agentFocusLabel, setAgentFocusLabel] = useState<string | null>(null);
+	const visibleFilePaths = useMemo(
+		() => new Set(bundles.map((bundle) => bundle.file_path)),
+		[bundles],
+	);
+	const sectionFeedbackAnnotations = useMemo(
+		() =>
+			section
+				? sectionFeedbackToDiffAnnotations(section, visibleFilePaths)
+				: [],
+		[section, visibleFilePaths],
+	);
+	const sectionTopNotes = useMemo(
+		() =>
+			section ? sectionFeedbackTopNotes(section, visibleFilePaths) : [],
+		[section, visibleFilePaths],
+	);
 
 	useEffect(() => {
 		setAgentFocusLabel(null);
@@ -401,66 +512,22 @@ export function DiffPane() {
 						{diffFocusError}
 					</div>
 				)}
+				{!loading && !loadError && (
+					<SectionNotesPanel notes={sectionTopNotes} />
+				)}
 				{!loading && !loadError && bundles.length === 0 && (
 					<div className="rounded-md border border-border bg-card/40 px-4 py-3 text-sm text-muted-foreground">
 						No textual changes in the listed files.
 					</div>
 				)}
 				{bundles.map((b) => (
-					<DiffFileCard key={b.file_path} bundle={b} />
+					<DiffFileCard
+						key={b.file_path}
+						bundle={b}
+						sectionFeedbackAnnotations={sectionFeedbackAnnotations}
+					/>
 				))}
 			</div>
-
-			{(section!.concerns.length > 0 ||
-				section!.uncovered_scenarios.length > 0 ||
-				section!.test_coverage_notes) && (
-				<div className="border-t border-border px-6 py-4">
-					{section!.test_coverage_notes && (
-						<div className="mb-4">
-							<h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-								Test coverage
-							</h3>
-							<p className="text-sm">{section!.test_coverage_notes}</p>
-						</div>
-					)}
-					{section!.concerns.length > 0 && (
-						<div className="mb-4">
-							<h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-								Concerns
-							</h3>
-							<ul className="space-y-1.5">
-								{section!.concerns.map((c, i) => (
-									<li key={i} className="flex items-baseline gap-2 text-sm">
-										<SeverityBadge severity={c.severity} />
-										<span className="flex-1">{c.text}</span>
-										{c.file_path && (
-											<span className="font-mono text-[11px] text-muted-foreground">
-												{c.file_path}
-												{c.line ? `:${c.line}` : ""}
-											</span>
-										)}
-									</li>
-								))}
-							</ul>
-						</div>
-					)}
-					{section!.uncovered_scenarios.length > 0 && (
-						<div>
-							<h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-								Uncovered scenarios
-							</h3>
-							<ul className="space-y-1.5">
-								{section!.uncovered_scenarios.map((c, i) => (
-									<li key={i} className="flex items-baseline gap-2 text-sm">
-										<SeverityBadge severity={c.severity} />
-										<span className="flex-1">{c.text}</span>
-									</li>
-								))}
-							</ul>
-						</div>
-					)}
-				</div>
-			)}
 
 		</section>
 	);
