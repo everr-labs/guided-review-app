@@ -36,7 +36,7 @@ test("DiffView does not render section feedback in a bottom panel", async () => 
 	assert.equal(source.includes("sectionFeedbackToDiffAnnotations"), true);
 });
 
-test("DiffView wires per-file collapse state through the store", async () => {
+test("DiffView passes per-file collapse state to Pierre", async () => {
 	const source = await readFile(
 		new URL("./DiffView.tsx", import.meta.url),
 		"utf8",
@@ -44,6 +44,8 @@ test("DiffView wires per-file collapse state through the store", async () => {
 
 	assert.match(source, /toggleFileExpanded/);
 	assert.match(source, /expandedFiles\[bundle\.file_path\]/);
+	assert.match(source, /collapsed: !expanded/);
+	assert.equal(source.includes("<Activity"), false);
 	assert.match(source, /Collapse all/);
 	assert.match(source, /Expand all/);
 });

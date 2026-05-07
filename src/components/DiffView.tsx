@@ -29,10 +29,6 @@ import {
 	type SectionFeedbackAnnotationMetadata,
 	type SectionFeedbackNote,
 } from "@/lib/sectionFeedback";
-import {
-	computeFileDiffStats,
-	type FileDiffStats,
-} from "@/lib/diffStats";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { stripMarkdownForSummary } from "@/lib/markdownContent";
 
@@ -165,11 +161,9 @@ function SectionNotesPanel({ notes }: { notes: SectionFeedbackNote[] }) {
 
 function DiffFileCard({
 	bundle,
-	stats,
 	sectionFeedbackAnnotations,
 }: {
 	bundle: FileBundle;
-	stats: FileDiffStats;
 	sectionFeedbackAnnotations: DiffLineAnnotation<SectionFeedbackAnnotationMetadata>[];
 }) {
 	const agentFocus = useApp((s) =>
@@ -268,21 +262,59 @@ function DiffFileCard({
 		[],
 	);
 
-	const options = useMemo(
-		() => ({
-			theme: "pierre-dark" as const,
-			diffStyle: "unified" as const,
-			enableLineSelection: true,
-			onLineSelected,
-		}),
-		[onLineSelected],
-	);
-
 	const noteCount = lineAnnotations.length;
 	const hasAgentNotes = sectionFeedbackAnnotations.some(
 		(annotation) => annotation.metadata.file_path === bundle.file_path,
 	);
 	const ChevronIcon = expanded ? ChevronDown : ChevronRight;
+
+	const renderHeaderPrefix = useCallback(
+		() => (
+			<button
+				type="button"
+				onClick={() => toggleFileExpanded(bundle.file_path)}
+				aria-expanded={expanded}
+				title={expanded ? "Collapse file" : "Expand file"}
+				className="-ml-1 inline-flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-muted focus:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+			>
+				<ChevronIcon className="size-3.5" />
+			</button>
+		),
+		[ChevronIcon, bundle.file_path, expanded, toggleFileExpanded],
+	);
+
+	const renderHeaderMetadata = useCallback(() => {
+		if (noteCount === 0 && !hasAgentNotes) return null;
+		return (
+			<span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+				{noteCount > 0 && (
+					<span className="inline-flex items-center gap-0.5 rounded border border-border/60 bg-background/60 px-1 py-0.5">
+						<MessageSquare className="size-3" />
+						<span className="tabular-nums">{noteCount}</span>
+					</span>
+				)}
+				{hasAgentNotes && (
+					<span
+						title="Reviewed by the agent"
+						className="inline-flex items-center text-primary"
+					>
+						<Sparkles className="size-3" />
+					</span>
+				)}
+			</span>
+		);
+	}, [hasAgentNotes, noteCount]);
+
+	const options = useMemo(
+		() => ({
+			theme: "pierre-dark" as const,
+			diffStyle: "unified" as const,
+			enableLineSelection: true,
+			collapsed: !expanded,
+			onLineSelected,
+		}),
+		[expanded, onLineSelected],
+	);
 
 	return (
 		<div
@@ -290,52 +322,16 @@ function DiffFileCard({
 			data-expanded={expanded ? "true" : "false"}
 			className="relative overflow-hidden rounded-md border border-border bg-card"
 		>
-			<button
-				type="button"
-				onClick={() => toggleFileExpanded(bundle.file_path)}
-				aria-expanded={expanded}
-				aria-controls={`diff-file-${bundle.file_path}`}
-				className="flex w-full items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5 text-left font-mono text-xs hover:bg-muted/70 focus:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-			>
-				<ChevronIcon className="size-3.5 shrink-0 text-muted-foreground" />
-				<span className="truncate">{bundle.file_path}</span>
-				<span className="ml-auto flex shrink-0 items-center gap-2 text-[10px]">
-					<span className="font-mono tabular-nums">
-						<span className="text-[oklch(0.78_0.16_155)]">
-							+{stats.additions}
-						</span>
-						<span className="ml-1 text-[oklch(0.7_0.18_25)]">
-							−{stats.deletions}
-						</span>
-					</span>
-					{noteCount > 0 && (
-						<span className="inline-flex items-center gap-0.5 rounded border border-border/60 bg-background/60 px-1 py-0.5 text-muted-foreground">
-							<MessageSquare className="size-3" />
-							<span className="tabular-nums">{noteCount}</span>
-						</span>
-					)}
-					{hasAgentNotes && (
-						<span
-							title="Reviewed by the agent"
-							className="inline-flex items-center text-primary"
-						>
-							<Sparkles className="size-3" />
-						</span>
-					)}
-				</span>
-			</button>
-			{expanded && (
-				<div id={`diff-file-${bundle.file_path}`}>
-					<MultiFileDiff
-						oldFile={oldFile}
-						newFile={newFile}
-						options={options}
-						lineAnnotations={lineAnnotations}
-						selectedLines={selectedLines}
-						renderAnnotation={renderAnnotation}
-					/>
-				</div>
-			)}
+			<MultiFileDiff
+				oldFile={oldFile}
+				newFile={newFile}
+				options={options}
+				lineAnnotations={lineAnnotations}
+				selectedLines={selectedLines}
+				renderAnnotation={renderAnnotation}
+				renderHeaderPrefix={renderHeaderPrefix}
+				renderHeaderMetadata={renderHeaderMetadata}
+			/>
 		</div>
 	);
 }
@@ -368,16 +364,6 @@ export function DiffPane() {
 		() => new Set(bundles.map((bundle) => bundle.file_path)),
 		[bundles],
 	);
-	const fileStats = useMemo(() => {
-		const map = new Map<string, FileDiffStats>();
-		for (const bundle of bundles) {
-			map.set(
-				bundle.file_path,
-				computeFileDiffStats(bundle.file_path, bundle.oldText, bundle.newText),
-			);
-		}
-		return map;
-	}, [bundles]);
 	const sectionFeedbackAnnotations = useMemo(
 		() =>
 			section
@@ -694,12 +680,6 @@ export function DiffPane() {
 					<DiffFileCard
 						key={b.file_path}
 						bundle={b}
-						stats={
-							fileStats.get(b.file_path) ?? {
-								additions: 0,
-								deletions: 0,
-							}
-						}
 						sectionFeedbackAnnotations={sectionFeedbackAnnotations}
 					/>
 				))}
