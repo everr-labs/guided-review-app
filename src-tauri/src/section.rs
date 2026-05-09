@@ -1,6 +1,7 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     High,
@@ -8,7 +9,7 @@ pub enum Severity {
     Low,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum RangeKind {
     Context,
@@ -18,7 +19,7 @@ pub enum RangeKind {
     Removed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LineRange {
     pub file_path: String,
     pub start_line: u32,
@@ -26,7 +27,16 @@ pub struct LineRange {
     pub kind: RangeKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UnimportantRange {
+    pub file_path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub kind: RangeKind,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Concern {
     pub text: String,
     pub severity: Severity,
@@ -36,14 +46,17 @@ pub struct Concern {
     pub line: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReviewSection {
     pub schema_version: u32,
     pub section_id: String,
     pub title: String,
     pub intent: String,
     pub files: Vec<String>,
+    #[serde(default)]
     pub ranges: Vec<LineRange>,
+    #[serde(default)]
+    pub unimportant_ranges: Vec<UnimportantRange>,
     pub concerns: Vec<Concern>,
     pub uncovered_scenarios: Vec<Concern>,
     pub test_coverage_notes: String,
@@ -52,17 +65,53 @@ pub struct ReviewSection {
     pub pause_prompt: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SectionMapEntry {
     pub section_id: String,
     pub title: String,
     pub intent: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SectionMap {
     pub schema_version: u32,
     pub sections: Vec<SectionMapEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SectionProgressPhase {
+    Started,
+    Ranges,
+    Feedback,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SectionProgressUpdate {
+    pub section_id: String,
+    pub phase: SectionProgressPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranges: Option<Vec<LineRange>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unimportant_ranges: Option<Vec<UnimportantRange>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concerns: Option<Vec<Concern>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncovered_scenarios: Option<Vec<Concern>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_coverage_notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

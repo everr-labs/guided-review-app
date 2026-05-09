@@ -1,50 +1,41 @@
+import { useState } from "react";
 import { useApp, type CommentDraftState } from "@/lib/store";
-import { acp } from "@/lib/acp";
-import {
-	prTargetFromSessionSource,
-	requestAddDraftToPendingReview,
-} from "@/lib/commentPublish";
+import { approveCommentDraft } from "@/lib/commentPublish";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { useMemo } from "react";
-import { X } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
+import { Pencil, X } from "lucide-react";
 
 export function CommentDraftCard({ state }: { state: CommentDraftState }) {
-	const session = useApp((s) => s.session);
 	const updateCommentDraft = useApp((s) => s.updateCommentDraft);
+	const editCommentDraftBody = useApp((s) => s.editCommentDraftBody);
 	const dismissCommentDraft = useApp((s) => s.dismissCommentDraft);
-	const pendingReview = useApp((s) => s.pendingReview);
-	const setPendingReview = useApp((s) => s.setPendingReview);
-	const commentDrafts = useApp((s) => s.commentDrafts);
-	const pushError = useApp((s) => s.pushError);
+	const [editing, setEditing] = useState(false);
+	const [editBody, setEditBody] = useState(state.draft.body);
+	const canEdit = state.status === "pending" || state.status === "approved";
+	const editedBodyIsEmpty = editBody.trim().length === 0;
 
-	const target = useMemo(
-		() => prTargetFromSessionSource(session?.source),
-		[session],
-	);
+	function approve() {
+		approveCommentDraft({
+			draft_id: state.id,
+			updateCommentDraft,
+		});
+	}
 
-	async function approve() {
-		if (!target || !session) return;
-		try {
-			await requestAddDraftToPendingReview({
-				draft_id: state.id,
-				target,
-				draft: state.draft,
-				head_sha: session.repo.head_sha,
-				pending_review: pendingReview,
-				comment_drafts: commentDrafts,
-				updateCommentDraft,
-				setPendingReview,
-				createPendingReview: acp.createPendingReview,
-				addPendingReviewThread: acp.addPendingReviewThread,
-				updatePendingReviewBody: acp.updatePendingReviewBody,
-			});
-		} catch (e) {
-			const message = e instanceof Error ? e.message : String(e);
-			pushError(
-				message || "Could not add the draft to the pending review.",
-			);
-		}
+	function startEditing() {
+		setEditBody(state.draft.body);
+		setEditing(true);
+	}
+
+	function cancelEditing() {
+		setEditBody(state.draft.body);
+		setEditing(false);
+	}
+
+	function saveEdit() {
+		if (editedBodyIsEmpty) return;
+		editCommentDraftBody(state.id, editBody);
+		setEditing(false);
 	}
 
 	return (
@@ -55,8 +46,22 @@ export function CommentDraftCard({ state }: { state: CommentDraftState }) {
 				</span>
 				<div className="flex items-center gap-1.5">
 					<span className="text-muted-foreground">{state.status}</span>
-					{state.status !== "pending_review" &&
-						state.status !== "submitting" && (
+					{canEdit && !editing && (
+						<Button
+							type="button"
+							size="icon"
+							variant="ghost"
+							className="size-6 text-muted-foreground hover:text-foreground"
+							onClick={startEditing}
+							aria-label="Edit comment draft"
+							title="Edit comment draft"
+						>
+							<Pencil className="size-3.5" />
+						</Button>
+					)}
+					{!editing &&
+						state.status !== "approved" &&
+						state.status !== "publishing" && (
 							<Button
 								type="button"
 								size="icon"
@@ -76,7 +81,34 @@ export function CommentDraftCard({ state }: { state: CommentDraftState }) {
 					{state.draft.side ? ` (${state.draft.side})` : ""}
 				</div>
 			)}
-			<div className="whitespace-pre-wrap text-sm">{state.draft.body}</div>
+			{editing && canEdit ? (
+				<div className="space-y-2">
+					<Textarea
+						value={editBody}
+						onChange={(event) => setEditBody(event.target.value)}
+						aria-label="Comment body"
+						className="min-h-24"
+					/>
+					<div className="flex gap-2">
+						<Button
+							size="sm"
+							onClick={saveEdit}
+							disabled={editedBodyIsEmpty}
+						>
+							Save
+						</Button>
+						<Button
+							size="sm"
+							variant="outline"
+							onClick={cancelEditing}
+						>
+							Cancel
+						</Button>
+					</div>
+				</div>
+			) : (
+				<div className="whitespace-pre-wrap text-sm">{state.draft.body}</div>
+			)}
 			{state.url && (
 				<a
 					className="mt-1.5 inline-block text-xs text-[oklch(0.7_0.16_155)]"
@@ -90,14 +122,13 @@ export function CommentDraftCard({ state }: { state: CommentDraftState }) {
 			{state.error && (
 				<div className="mt-1.5 text-xs text-destructive">{state.error}</div>
 			)}
-			{state.status === "pending" && (
+			{state.status === "pending" && !editing && (
 				<div className="mt-2 flex gap-2">
 					<Button
 						size="sm"
 						onClick={approve}
-						disabled={!target}
 					>
-						{target ? "Add to pending review" : "PR target unknown"}
+						Approve
 					</Button>
 					<Button
 						size="sm"
@@ -108,9 +139,9 @@ export function CommentDraftCard({ state }: { state: CommentDraftState }) {
 					</Button>
 				</div>
 			)}
-			{state.status === "pending_review" && (
+			{state.status === "approved" && !editing && (
 				<div className="mt-2 text-xs text-muted-foreground">
-					Saved in GitHub as a pending review comment.
+					Approved locally. It will be published when you submit the batch.
 				</div>
 			)}
 		</Card>

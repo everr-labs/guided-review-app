@@ -14,6 +14,7 @@ function section(overrides: Partial<ReviewSection> = {}): ReviewSection {
 		intent: "Review inline feedback.",
 		files: ["src/main.ts"],
 		ranges: [],
+		unimportant_ranges: [],
 		concerns: [],
 		uncovered_scenarios: [],
 		test_coverage_notes: "",
@@ -29,7 +30,7 @@ test("section concerns with file and line become diff annotations", () => {
 		section({
 			concerns: [
 				{
-					text: "This can publish an empty pending review.",
+					text: "This can publish an empty approved batch.",
 					severity: "medium",
 					file_path: "src/main.ts",
 					line: 12,
@@ -46,7 +47,7 @@ test("section concerns with file and line become diff annotations", () => {
 		{
 			kind: "concern",
 			label: "Concern",
-			text: "This can publish an empty pending review.",
+			text: "This can publish an empty approved batch.",
 			severity: "medium",
 			file_path: "src/main.ts",
 			line: 12,

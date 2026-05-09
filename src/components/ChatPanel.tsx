@@ -17,7 +17,7 @@ import {
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
 import {
 	prTargetFromSessionSource,
-	requestSubmitPendingReview,
+	requestAgentPublishApprovedDrafts,
 } from "@/lib/commentPublish";
 import {
 	formatDiffReferenceForMessage,
@@ -208,7 +208,6 @@ export function ChatPanel() {
 	const session = useApp((s) => s.session);
 	const chat = useApp((s) => s.chat);
 	const drafts = useApp((s) => s.commentDrafts);
-	const pendingReview = useApp((s) => s.pendingReview);
 	const streaming = useApp((s) => s.streaming);
 	const sections = useApp((s) => s.sections);
 	const processingSectionId = useApp((s) => s.processingSectionId);
@@ -222,12 +221,9 @@ export function ChatPanel() {
 		(s) => s.clearPendingDiffReferences,
 	);
 	const updateCommentDraft = useApp((s) => s.updateCommentDraft);
-	const markPendingReviewSubmitted = useApp(
-		(s) => s.markPendingReviewSubmitted,
-	);
 
 	const [input, setInput] = useState("");
-	const [submittingReview, setSubmittingReview] = useState(false);
+	const [publishingComments, setPublishingComments] = useState(false);
 	const [fullPageResponse, setFullPageResponse] =
 		useState<FullPageResponse | null>(null);
 	const scrollerRef = useRef<HTMLDivElement>(null);
@@ -278,28 +274,28 @@ export function ChatPanel() {
 		}
 	}
 
-	async function submitPendingReview() {
-		if (!session || !pendingReview || submittingReview) return;
+	async function submitApprovedDrafts() {
+		if (!session || publishingComments) return;
 		const target = prTargetFromSessionSource(session.source);
 		if (!target) {
 			pushError("PR target unknown.");
 			return;
 		}
-		setSubmittingReview(true);
+		setPublishingComments(true);
 		try {
-			await requestSubmitPendingReview({
+			await requestAgentPublishApprovedDrafts({
+				session_id: session.session_id,
 				target,
-				pending_review: pendingReview,
+				head_sha: session.repo.head_sha,
 				comment_drafts: drafts,
 				updateCommentDraft,
-				markPendingReviewSubmitted,
-				submitPendingReview: acp.submitPendingReview,
+				sendMessage: acp.sendMessage,
 			});
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
-			pushError(message || "Could not submit the pending review.");
+			pushError(message || "Could not ask the agent to publish the comments.");
 		} finally {
-			setSubmittingReview(false);
+			setPublishingComments(false);
 		}
 	}
 
@@ -405,23 +401,18 @@ export function ChatPanel() {
 						{drafts.map((d) => (
 							<CommentDraftCard key={d.id} state={d} />
 						))}
-						{pendingReview &&
-							drafts.some(
-								(d) =>
-									d.status === "pending_review" &&
-									d.pending_review_id === pendingReview.review_id,
-							) && (
-								<Button
-									size="sm"
-									onClick={submitPendingReview}
-									disabled={submittingReview}
-								>
-									{submittingReview ? (
-										<LoaderCircle className="size-3.5 animate-spin" />
-									) : null}
-									Submit review comments
-								</Button>
-							)}
+						{drafts.some((d) => d.status === "approved") && (
+							<Button
+								size="sm"
+								onClick={submitApprovedDrafts}
+								disabled={publishingComments}
+							>
+								{publishingComments ? (
+									<LoaderCircle className="size-3.5 animate-spin" />
+								) : null}
+								Submit approved comments
+							</Button>
+						)}
 					</div>
 				)}
 			</div>

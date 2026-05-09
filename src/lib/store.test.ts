@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type { DiffFocusRange } from "./diffFocus";
 import type { ChatMessage } from "./types/section";
@@ -97,7 +98,6 @@ async function resetReviewState() {
 		processingSectionId: null,
 		chat: [],
 		commentDrafts: [],
-		pendingReview: null,
 		publishedComments: [],
 		publishedCommentsFetchedAt: null,
 		publishedCommentsError: null,
@@ -108,7 +108,6 @@ async function resetReviewState() {
 		diffFocus: null,
 		diffFocusError: null,
 		pendingDiffReferences: [],
-		expandedFiles: {},
 	});
 }
 
@@ -182,6 +181,60 @@ test("setSectionMap keeps PR description first and appends agent sections", asyn
 	assert.equal(useApp.getState().currentSectionId, "pr-description");
 });
 
+test("setSectionMap seeds preview section files and map-owned ranges", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "validation-flow",
+			title: "Validation flow",
+			intent: "Checks before saving",
+			files: ["src/lib/store.ts"],
+			ranges: [
+				{
+					file_path: "src/lib/store.ts",
+					start_line: 120,
+					end_line: 180,
+					kind: "changed-new",
+				},
+			],
+		},
+	]);
+
+	const section = useApp.getState().sections[1];
+	assert.equal(section?.kind, "review_section");
+	assert.equal(section?.status, "pending");
+	assert.deepEqual(
+		section?.kind === "review_section" ? section.section?.files : [],
+		["src/lib/store.ts"],
+	);
+	assert.deepEqual(
+		section?.kind === "review_section" ? section.section?.ranges : [],
+		[
+			{
+				file_path: "src/lib/store.ts",
+				start_line: 120,
+				end_line: 180,
+				kind: "changed-new",
+			},
+		],
+	);
+	assert.equal(
+		section?.kind === "review_section" ? section.section?.base_ref : "",
+		repo.base_ref,
+	);
+	assert.equal(
+		section?.kind === "review_section" ? section.section?.head_ref : "",
+		repo.head_ref,
+	);
+	assert.deepEqual(
+		section?.kind === "review_section" ? section.section?.concerns : [],
+		[],
+	);
+});
+
 test("auto-opening the first review section keeps PR description selected", async () => {
 	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
 	await resetReviewState();
@@ -220,6 +273,7 @@ test("upsertSection keeps PR description selected while first real section loads
 		intent: "Understand the change",
 		files: [],
 		ranges: [],
+		unimportant_ranges: [],
 		concerns: [],
 		uncovered_scenarios: [],
 		test_coverage_notes: "",
@@ -232,6 +286,231 @@ test("upsertSection keeps PR description selected while first real section loads
 	assert.equal(useApp.getState().processingSectionId, null);
 	assert.equal(useApp.getState().sections[1]?.kind, "review_section");
 	assert.equal(useApp.getState().sections[1]?.status, "in_review");
+});
+
+test("feedback-only section merges into map preview without replacing structure", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	const { parseReviewSectionPayload } = await import(
+		new URL("./reviewSectionPayload.ts", import.meta.url).href
+	);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "validation-flow",
+			title: "Validation flow",
+			intent: "Checks before saving",
+			files: ["src/lib/store.ts"],
+			ranges: [
+				{
+					file_path: "src/lib/store.ts",
+					start_line: 120,
+					end_line: 180,
+					kind: "changed-new",
+				},
+			],
+		},
+	]);
+	useApp.getState().startSectionProcessing("validation-flow");
+
+	const feedback = parseReviewSectionPayload({
+		section_id: "validation-flow",
+		concerns: [
+			{
+				text: "Empty input can still be submitted.",
+				severity: "medium",
+				file_path: "src/lib/store.ts",
+				line: 148,
+			},
+		],
+		uncovered_scenarios: [],
+		test_coverage_notes: "Missing empty input coverage.",
+		pause_prompt: "Want to leave a comment?",
+	});
+	assert(feedback);
+
+	useApp.getState().upsertSection(feedback);
+
+	const section = useApp.getState().sections[1];
+	assert.equal(section?.kind, "review_section");
+	assert.equal(section?.status, "in_review");
+	assert.equal(useApp.getState().processingSectionId, null);
+	assert.deepEqual(
+		section?.kind === "review_section" ? section.section?.files : [],
+		["src/lib/store.ts"],
+	);
+	assert.deepEqual(
+		section?.kind === "review_section" ? section.section?.ranges : [],
+		[
+			{
+				file_path: "src/lib/store.ts",
+				start_line: 120,
+				end_line: 180,
+				kind: "changed-new",
+			},
+		],
+	);
+	assert.equal(
+		section?.kind === "review_section"
+			? section.section?.concerns[0]?.text
+			: "",
+		"Empty input can still be submitted.",
+	);
+	assert.equal(
+		section?.kind === "review_section" ? section.section?.pause_prompt : "",
+		"Want to leave a comment?",
+	);
+});
+
+test("legacy full section cannot overwrite map-owned files and ranges", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "validation-flow",
+			title: "Validation flow",
+			intent: "Checks before saving",
+			files: ["src/lib/store.ts"],
+			ranges: [
+				{
+					file_path: "src/lib/store.ts",
+					start_line: 120,
+					end_line: 180,
+					kind: "changed-new",
+				},
+			],
+		},
+	]);
+
+	useApp.getState().upsertSection({
+		schema_version: 1,
+		section_id: "validation-flow",
+		title: "Legacy title",
+		intent: "Legacy intent",
+		files: ["src/lib/other.ts"],
+		ranges: [
+			{
+				file_path: "src/lib/other.ts",
+				start_line: 1,
+				end_line: 2,
+				kind: "changed-new",
+			},
+		],
+		unimportant_ranges: [],
+		concerns: [],
+		uncovered_scenarios: [],
+		test_coverage_notes: "Legacy feedback.",
+		base_ref: "wrong-base",
+		head_ref: "wrong-head",
+		pause_prompt: "",
+	});
+
+	const section = useApp.getState().sections[1];
+	assert.equal(section?.kind, "review_section");
+	assert.equal(section?.title, "Validation flow");
+	assert.deepEqual(
+		section?.kind === "review_section" ? section.section?.files : [],
+		["src/lib/store.ts"],
+	);
+	assert.deepEqual(
+		section?.kind === "review_section" ? section.section?.ranges : [],
+		[
+			{
+				file_path: "src/lib/store.ts",
+				start_line: 120,
+				end_line: 180,
+				kind: "changed-new",
+			},
+		],
+	);
+	assert.equal(
+		section?.kind === "review_section" ? section.section?.base_ref : "",
+		repo.base_ref,
+	);
+	assert.equal(
+		section?.kind === "review_section" ? section.section?.head_ref : "",
+		repo.head_ref,
+	);
+});
+
+test("upsertSectionProgress merges progressive range and feedback updates", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "validation-flow",
+			title: "Validation flow",
+			intent: "Checks before saving",
+		},
+	]);
+
+	useApp.getState().upsertSectionProgress({
+		section_id: "validation-flow",
+		phase: "ranges",
+		files: ["src/lib/store.ts"],
+		ranges: [
+			{
+				file_path: "src/lib/store.ts",
+				start_line: 120,
+				end_line: 180,
+				kind: "changed-new",
+			},
+		],
+	});
+
+	useApp.getState().upsertSectionProgress({
+		section_id: "validation-flow",
+		phase: "feedback",
+		concerns: [
+			{
+				text: "Empty input can still be submitted.",
+				severity: "medium",
+				file_path: "src/lib/store.ts",
+				line: 148,
+			},
+		],
+		test_coverage_notes: "Happy path is covered; empty input is not.",
+	});
+
+	const section = useApp.getState().sections[1];
+	assert.equal(section?.kind, "review_section");
+	assert.equal(section?.status, "in_review");
+	assert.equal(useApp.getState().processingSectionId, "validation-flow");
+	assert.deepEqual(
+		section?.kind === "review_section" ? section.section?.files : [],
+		["src/lib/store.ts"],
+	);
+	assert.deepEqual(
+		section?.kind === "review_section" ? section.section?.ranges : [],
+		[
+			{
+				file_path: "src/lib/store.ts",
+				start_line: 120,
+				end_line: 180,
+				kind: "changed-new",
+			},
+		],
+	);
+	assert.equal(
+		section?.kind === "review_section"
+			? section.section?.concerns[0]?.text
+			: "",
+		"Empty input can still be submitted.",
+	);
+	assert.equal(
+		section?.kind === "review_section" ? section.section?.base_ref : "",
+		repo.base_ref,
+	);
+	assert.equal(
+		section?.kind === "review_section" ? section.section?.head_ref : "",
+		repo.head_ref,
+	);
+	assert.equal(useApp.getState().currentSectionId, "pr-description");
 });
 
 test("setProject saves and clears the last selected project path", async () => {
@@ -320,6 +599,7 @@ test("section processing state clears when the requested section arrives", async
 		intent: "Review metadata behavior",
 		files: [],
 		ranges: [],
+		unimportant_ranges: [],
 		concerns: [],
 		uncovered_scenarios: [],
 		test_coverage_notes: "",
@@ -393,6 +673,7 @@ test("addReviewSectionItem stores readable files and feedback", async () => {
 		intent: "Review behavior changes",
 		files: ["src/lib.rs", "src/main.rs"],
 		ranges: [],
+		unimportant_ranges: [],
 		concerns: [
 			{
 				text: "Missing empty input check.",
@@ -613,6 +894,42 @@ test("dismissCommentDraft removes the matching draft only", async () => {
 	);
 });
 
+test("editCommentDraftBody updates a draft body without changing its status", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+
+	useApp.setState({
+		commentDrafts: [
+			{
+				id: "draft-123",
+				status: "approved",
+				draft: {
+					kind: "inline",
+					body: "Original text.",
+					file_path: "src/main.rs",
+					line: 12,
+					side: "RIGHT",
+				},
+			},
+		],
+	});
+
+	useApp.getState().editCommentDraftBody("draft-123", "Edited text.");
+
+	assert.deepEqual(useApp.getState().commentDrafts, [
+		{
+			id: "draft-123",
+			status: "approved",
+			draft: {
+				kind: "inline",
+				body: "Edited text.",
+				file_path: "src/main.rs",
+				line: 12,
+				side: "RIGHT",
+			},
+		},
+	]);
+});
+
 test("applyCommentResult removes published drafts", async () => {
 	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
 
@@ -666,52 +983,12 @@ test("applyCommentResult removes failed drafts", async () => {
 	assert.deepEqual(useApp.getState().commentDrafts, []);
 });
 
-test("toggleFileExpanded flips a single file's expansion state", async () => {
-	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
-	await resetReviewState();
+test("store does not keep diff file collapse state", async () => {
+	const source = await readFile(new URL("./store.ts", import.meta.url), "utf8");
 
-	useApp.getState().toggleFileExpanded("src/a.ts");
-	assert.equal(useApp.getState().expandedFiles["src/a.ts"], true);
-
-	useApp.getState().toggleFileExpanded("src/a.ts");
-	assert.equal(useApp.getState().expandedFiles["src/a.ts"], undefined);
-});
-
-test("expandFile is idempotent and only expands the one file", async () => {
-	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
-	await resetReviewState();
-
-	useApp.getState().expandFile("src/a.ts");
-	const after = useApp.getState().expandedFiles;
-	useApp.getState().expandFile("src/a.ts");
-
-	assert.deepEqual(useApp.getState().expandedFiles, { "src/a.ts": true });
-	assert.equal(useApp.getState().expandedFiles, after);
-});
-
-test("expandFiles and collapseAllFiles operate on the full set", async () => {
-	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
-	await resetReviewState();
-
-	useApp.getState().expandFiles(["src/a.ts", "src/b.ts", "src/c.ts"]);
-	assert.deepEqual(useApp.getState().expandedFiles, {
-		"src/a.ts": true,
-		"src/b.ts": true,
-		"src/c.ts": true,
-	});
-
-	useApp.getState().collapseAllFiles();
-	assert.deepEqual(useApp.getState().expandedFiles, {});
-});
-
-test("expanded files survive section changes but are cleared by reset", async () => {
-	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
-	await resetReviewState();
-
-	useApp.getState().expandFile("src/a.ts");
-	useApp.getState().setCurrentSection("section-2");
-	assert.deepEqual(useApp.getState().expandedFiles, { "src/a.ts": true });
-
-	useApp.getState().reset();
-	assert.deepEqual(useApp.getState().expandedFiles, {});
+	assert.doesNotMatch(source, /expandedFiles/);
+	assert.doesNotMatch(source, /collapsedFiles/);
+	assert.doesNotMatch(source, /toggleFileExpanded/);
+	assert.doesNotMatch(source, /expandFiles/);
+	assert.doesNotMatch(source, /collapseAllFiles/);
 });

@@ -1,5 +1,6 @@
 use crate::events::*;
 use crate::section::{CommentDraft, CommentResult, ReviewSection, SectionMap};
+use crate::telemetry;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -23,19 +24,25 @@ struct SectionWire {
     #[serde(default)]
     schema_version: Option<u32>,
     section_id: String,
+    #[serde(default)]
     title: String,
+    #[serde(default)]
     intent: String,
     #[serde(default)]
     files: Vec<String>,
     #[serde(default)]
     ranges: Vec<crate::section::LineRange>,
     #[serde(default)]
+    unimportant_ranges: Vec<crate::section::UnimportantRange>,
+    #[serde(default)]
     concerns: Vec<crate::section::Concern>,
     #[serde(default)]
     uncovered_scenarios: Vec<crate::section::Concern>,
     #[serde(default)]
     test_coverage_notes: String,
+    #[serde(default)]
     base_ref: String,
+    #[serde(default)]
     head_ref: String,
     #[serde(default)]
     pause_prompt: String,
@@ -98,6 +105,12 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     schema_version: wire.schema_version.unwrap_or(1),
                     sections: wire.sections,
                 };
+                let span = tracing::info_span!(
+                    "acp.section_map",
+                    session_id,
+                    sections = map.sections.len(),
+                );
+                let _enter = span.enter();
                 tracing::info!(
                     session_id,
                     sections = map.sections.len(),
@@ -108,6 +121,7 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     SectionMapEvent {
                         session_id: session_id.to_string(),
                         map,
+                        telemetry_context: telemetry::current_context(),
                     },
                 );
             }
@@ -118,6 +132,7 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     ErrorEvent {
                         session_id: Some(session_id.to_string()),
                         error: format!("section map JSON invalid: {e}"),
+                        telemetry_context: telemetry::current_context(),
                     },
                 );
             }
@@ -131,6 +146,7 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     intent: wire.intent,
                     files: wire.files,
                     ranges: wire.ranges,
+                    unimportant_ranges: wire.unimportant_ranges,
                     concerns: wire.concerns,
                     uncovered_scenarios: wire.uncovered_scenarios,
                     test_coverage_notes: wire.test_coverage_notes,
@@ -138,6 +154,14 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     head_ref: wire.head_ref,
                     pause_prompt: wire.pause_prompt,
                 };
+                let span = tracing::info_span!(
+                    "acp.section",
+                    session_id,
+                    section_id = %section.section_id,
+                    files = section.files.len(),
+                    concerns = section.concerns.len(),
+                );
+                let _enter = span.enter();
                 tracing::info!(
                     session_id,
                     section_id = %section.section_id,
@@ -150,6 +174,7 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     SectionEvent {
                         session_id: session_id.to_string(),
                         section,
+                        telemetry_context: telemetry::current_context(),
                     },
                 );
             }
@@ -160,12 +185,15 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     ErrorEvent {
                         session_id: Some(session_id.to_string()),
                         error: format!("section JSON invalid: {e}"),
+                        telemetry_context: telemetry::current_context(),
                     },
                 );
             }
         },
         TAG_COMMENT_DRAFT => match parse_lenient::<CommentDraft>(body) {
             Ok(draft) => {
+                let span = tracing::info_span!("acp.comment_draft", session_id);
+                let _enter = span.enter();
                 tracing::info!(session_id, kind = ?draft.kind, "comment draft parsed");
                 let draft_id = format!("draft-{}", uuid::Uuid::new_v4());
                 let _ = app.emit(
@@ -174,6 +202,7 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                         session_id: session_id.to_string(),
                         draft_id,
                         draft,
+                        telemetry_context: telemetry::current_context(),
                     },
                 );
             }
@@ -183,6 +212,13 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
         },
         TAG_COMMENT_RESULT => match parse_lenient::<CommentResult>(body) {
             Ok(result) => {
+                let span = tracing::info_span!(
+                    "acp.comment_result",
+                    session_id,
+                    draft_id = %result.draft_id,
+                    status = ?result.status,
+                );
+                let _enter = span.enter();
                 tracing::info!(
                     session_id,
                     draft_id = %result.draft_id,
@@ -194,6 +230,7 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     CommentResultEvent {
                         session_id: session_id.to_string(),
                         result,
+                        telemetry_context: telemetry::current_context(),
                     },
                 );
             }
@@ -204,6 +241,7 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     ErrorEvent {
                         session_id: Some(session_id.to_string()),
                         error: format!("comment result JSON invalid: {e}"),
+                        telemetry_context: telemetry::current_context(),
                     },
                 );
             }

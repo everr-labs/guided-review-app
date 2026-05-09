@@ -36,18 +36,43 @@ test("DiffView does not render section feedback in a bottom panel", async () => 
 	assert.equal(source.includes("sectionFeedbackToDiffAnnotations"), true);
 });
 
-test("DiffView passes per-file collapse state to Pierre", async () => {
+test("DiffView keeps per-file collapsed state locally and passes it to Pierre", async () => {
 	const source = await readFile(
 		new URL("./DiffView.tsx", import.meta.url),
 		"utf8",
 	);
 
-	assert.match(source, /toggleFileExpanded/);
-	assert.match(source, /expandedFiles\[bundle\.file_path\]/);
-	assert.match(source, /collapsed: !expanded/);
+	assert.match(source, /collapsedFiles/);
+	assert.match(source, /toggleFileCollapsed/);
+	assert.match(source, /collapsedFiles\[b\.file_path\]/);
+	assert.match(source, /collapsed,/);
+	assert.doesNotMatch(source, /expandedFiles/);
+	assert.doesNotMatch(source, /toggleFileExpanded/);
 	assert.equal(source.includes("<Activity"), false);
 	assert.match(source, /Collapse all/);
 	assert.match(source, /Expand all/);
+});
+
+test("DiffView starts each section with every loaded file open by default", async () => {
+	const source = await readFile(
+		new URL("./DiffView.tsx", import.meta.url),
+		"utf8",
+	);
+
+	assert.match(source, /setCollapsedFiles\(\{\}\)/);
+	assert.doesNotMatch(source, /defaultExpandedSectionsRef/);
+	assert.doesNotMatch(source, /expandFiles\(allFilePaths\)/);
+});
+
+test("DiffView wires agent unimportant ranges into Pierre post render", async () => {
+	const source = await readFile(
+		new URL("./DiffView.tsx", import.meta.url),
+		"utf8",
+	);
+
+	assert.match(source, /unimportant_ranges/);
+	assert.match(source, /applyUnimportantRangeFolds/);
+	assert.match(source, /onPostRender/);
 });
 
 test("DiffView auto-expands the file the agent focuses on", async () => {
@@ -56,7 +81,7 @@ test("DiffView auto-expands the file the agent focuses on", async () => {
 		"utf8",
 	);
 
-	assert.match(source, /expandFile\(diffFocus\.file_path\)/);
+	assert.match(source, /openFiles\(\[diffFocus\.file_path\]\)/);
 });
 
 test("DiffView auto-expands files with notes once per section", async () => {
@@ -67,5 +92,26 @@ test("DiffView auto-expands files with notes once per section", async () => {
 
 	assert.match(source, /filesWithNotes/);
 	assert.match(source, /autoExpandedSectionsRef/);
-	assert.match(source, /expandFiles\(filesWithNotes\)/);
+	assert.match(source, /openFiles\(filesWithNotes\)/);
+});
+
+test("DiffView shows a progressive loading message before section files arrive", async () => {
+	const source = await readFile(
+		new URL("./DiffView.tsx", import.meta.url),
+		"utf8",
+	);
+
+	assert.match(source, /sectionIsProcessing/);
+	assert.match(source, /Agent is finding files and ranges/);
+});
+
+test("DiffView offers a feedback request for preview-only sections", async () => {
+	const source = await readFile(
+		new URL("./DiffView.tsx", import.meta.url),
+		"utf8",
+	);
+
+	assert.match(source, /requestSectionFeedback/);
+	assert.match(source, /Load feedback/);
+	assert.match(source, /formatPublishedCommentsForPrompt/);
 });

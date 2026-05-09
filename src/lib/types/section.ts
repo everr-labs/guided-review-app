@@ -14,6 +14,10 @@ export interface LineRange {
 	kind: RangeKind;
 }
 
+export interface UnimportantRange extends LineRange {
+	reason: string;
+}
+
 export interface Concern {
 	text: string;
 	severity: Severity;
@@ -28,6 +32,7 @@ export interface ReviewSection {
 	intent: string;
 	files: string[];
 	ranges: LineRange[];
+	unimportant_ranges: UnimportantRange[];
 	concerns: Concern[];
 	uncovered_scenarios: Concern[];
 	test_coverage_notes: string;
@@ -40,11 +45,30 @@ export interface SectionMapEntry {
 	section_id: string;
 	title: string;
 	intent: string;
+	files?: string[];
+	ranges?: LineRange[];
 }
 
 export interface SectionMap {
 	schema_version: 1;
 	sections: SectionMapEntry[];
+}
+
+export type SectionProgressPhase = "started" | "ranges" | "feedback";
+
+export interface SectionProgressUpdate {
+	section_id: string;
+	phase: SectionProgressPhase;
+	title?: string;
+	intent?: string;
+	files?: string[];
+	ranges?: LineRange[];
+	unimportant_ranges?: UnimportantRange[];
+	concerns?: Concern[];
+	uncovered_scenarios?: Concern[];
+	test_coverage_notes?: string;
+	base_ref?: string;
+	head_ref?: string;
 }
 
 export type CommentKind = "inline" | "top_level";

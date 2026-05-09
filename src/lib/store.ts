@@ -7,12 +7,12 @@ import type {
 	CommentResult,
 	ReviewSection,
 	SectionMapEntry,
+	SectionProgressUpdate,
 	SectionStatus,
 	ToolCallItem,
 } from "./types/section";
 import type {
 	ClonedRepo,
-	PendingReview,
 	PublishedPrComment,
 	PullRequestMetadata,
 	SessionSource,
@@ -33,6 +33,133 @@ export interface SessionInfo {
 }
 
 export const PR_DESCRIPTION_SECTION_ID = "pr-description";
+
+function hasSectionFeedback(section: ReviewSection): boolean {
+	return (
+		section.concerns.length > 0 ||
+		section.uncovered_scenarios.length > 0 ||
+		section.test_coverage_notes.trim().length > 0 ||
+		section.pause_prompt.trim().length > 0
+	);
+}
+
+function emptyFeedbackSection(
+	section_id: string,
+	title: string,
+	intent: string,
+	session: SessionInfo | null,
+): ReviewSection {
+	return {
+		schema_version: 1,
+		section_id,
+		title,
+		intent,
+		files: [],
+		ranges: [],
+		unimportant_ranges: [],
+		concerns: [],
+		uncovered_scenarios: [],
+		test_coverage_notes: "",
+		base_ref: session?.repo.base_ref ?? "",
+		head_ref: session?.repo.head_ref ?? "",
+		pause_prompt: "",
+	};
+}
+
+function mergeMapEntrySection(
+	entry: SectionMapEntry,
+	existing: ReviewSectionState | undefined,
+	session: SessionInfo | null,
+): ReviewSection | undefined {
+	const previous = existing?.section;
+	const hasPreview =
+		Array.isArray(entry.files) || Array.isArray(entry.ranges);
+	if (!hasPreview && !previous) return undefined;
+	const section = previous
+		? { ...previous }
+		: emptyFeedbackSection(entry.section_id, entry.title, entry.intent, session);
+	return {
+		...section,
+		section_id: entry.section_id,
+		title: entry.title,
+		intent: entry.intent,
+		files: entry.files ?? section.files,
+		ranges: entry.ranges ?? section.ranges,
+		base_ref: section.base_ref || session?.repo.base_ref || "",
+		head_ref: section.head_ref || session?.repo.head_ref || "",
+	};
+}
+
+function hasStructure(section: ReviewSection | undefined): boolean {
+	return Boolean(
+		section &&
+			(section.files.length > 0 ||
+				section.ranges.length > 0 ||
+				section.base_ref ||
+				section.head_ref),
+	);
+}
+
+function mergeSectionProgress(
+	update: SectionProgressUpdate,
+	existing: ReviewSectionState | undefined,
+	session: SessionInfo | null,
+): ReviewSection {
+	const previous = existing?.section;
+	const previousHasStructure = hasStructure(previous);
+	return {
+		schema_version: 1,
+		section_id: update.section_id,
+		title: update.title ?? previous?.title ?? existing?.title ?? update.section_id,
+		intent: update.intent ?? previous?.intent ?? existing?.intent ?? "",
+		files: previousHasStructure
+			? previous?.files ?? []
+			: update.files ?? previous?.files ?? [],
+		ranges: previousHasStructure
+			? previous?.ranges ?? []
+			: update.ranges ?? previous?.ranges ?? [],
+		unimportant_ranges:
+			update.unimportant_ranges ?? previous?.unimportant_ranges ?? [],
+		concerns: update.concerns ?? previous?.concerns ?? [],
+		uncovered_scenarios:
+			update.uncovered_scenarios ?? previous?.uncovered_scenarios ?? [],
+		test_coverage_notes:
+			update.test_coverage_notes ?? previous?.test_coverage_notes ?? "",
+		base_ref: update.base_ref ?? previous?.base_ref ?? session?.repo.base_ref ?? "",
+		head_ref: update.head_ref ?? previous?.head_ref ?? session?.repo.head_ref ?? "",
+		pause_prompt: previous?.pause_prompt ?? "",
+	};
+}
+
+function mergeSectionFeedback(
+	section: ReviewSection,
+	existing: ReviewSectionState | undefined,
+	session: SessionInfo | null,
+): ReviewSection {
+	const previous = existing?.section;
+	const previousHasStructure = hasStructure(previous);
+	return {
+		schema_version: 1,
+		section_id: section.section_id,
+		title: previous?.title ?? existing?.title ?? section.title,
+		intent: previous?.intent ?? existing?.intent ?? section.intent,
+		files: previousHasStructure ? previous?.files ?? [] : section.files ?? [],
+		ranges: previousHasStructure ? previous?.ranges ?? [] : section.ranges ?? [],
+		unimportant_ranges: previous
+			? previous.unimportant_ranges
+			: section.unimportant_ranges ?? [],
+		concerns: section.concerns ?? [],
+		uncovered_scenarios: section.uncovered_scenarios ?? [],
+		test_coverage_notes: section.test_coverage_notes ?? "",
+		base_ref: previousHasStructure
+			? previous?.base_ref ?? ""
+			: section.base_ref || session?.repo.base_ref || "",
+		head_ref: previousHasStructure
+			? previous?.head_ref ?? ""
+			: section.head_ref || session?.repo.head_ref || "",
+		pause_prompt: section.pause_prompt ?? "",
+	};
+}
 
 interface BaseSectionState {
 	id: string;
@@ -60,15 +187,11 @@ export interface CommentDraftState {
 	draft: CommentDraft;
 	status:
 		| "pending"
-		| "adding_to_review"
-		| "pending_review"
-		| "submitting"
+		| "approved"
 		| "publishing"
 		| "published"
 		| "rejected"
 		| "error";
-	pending_review_id?: number;
-	pending_review_node_id?: string;
 	url?: string;
 	error?: string;
 }
@@ -86,7 +209,6 @@ interface AppState {
 	processingSectionId: string | null;
 	chat: ChatMessage[];
 	commentDrafts: CommentDraftState[];
-	pendingReview: PendingReview | null;
 	publishedComments: PublishedPrComment[];
 	publishedCommentsFetchedAt: number | null;
 	publishedCommentsError: string | null;
@@ -98,13 +220,13 @@ interface AppState {
 	diffFocus: DiffFocusRange | null;
 	diffFocusError: string | null;
 	pendingDiffReferences: DiffFocusRange[];
-	expandedFiles: Record<string, true>;
 
 	setProject: (p: LocalProject | null) => void;
 	setSession: (s: SessionInfo | null) => void;
 	reset: () => void;
 	setSectionMap: (entries: SectionMapEntry[]) => void;
 	upsertSection: (section: ReviewSection) => void;
+	upsertSectionProgress: (update: SectionProgressUpdate) => void;
 	markSectionCompleted: (id: string) => void;
 	setCurrentSection: (id: string | null, reason?: string) => void;
 	startSectionProcessing: (id: string) => void;
@@ -120,10 +242,8 @@ interface AppState {
 
 	addCommentDraft: (id: string, draft: CommentDraft) => void;
 	updateCommentDraft: (id: string, patch: Partial<CommentDraftState>) => void;
+	editCommentDraftBody: (id: string, body: string) => void;
 	dismissCommentDraft: (id: string) => void;
-	setPendingReview: (review: PendingReview | null) => void;
-	clearPendingReview: () => void;
-	markPendingReviewSubmitted: (reviewId: number) => void;
 	applyCommentResult: (result: CommentResult) => void;
 
 	pushError: (e: string) => void;
@@ -139,11 +259,6 @@ interface AppState {
 	addPendingDiffReference: (range: DiffFocusRange) => void;
 	removePendingDiffReference: (id: string) => void;
 	clearPendingDiffReferences: () => void;
-
-	toggleFileExpanded: (filePath: string) => void;
-	expandFile: (filePath: string) => void;
-	expandFiles: (filePaths: string[]) => void;
-	collapseAllFiles: () => void;
 }
 
 const LS_KEYS = {
@@ -347,7 +462,6 @@ export const useApp = create<AppState>((set) => ({
 	processingSectionId: null,
 	chat: [],
 	commentDrafts: [],
-	pendingReview: null,
 	publishedComments: [],
 	publishedCommentsFetchedAt: null,
 	publishedCommentsError: null,
@@ -359,7 +473,6 @@ export const useApp = create<AppState>((set) => ({
 	diffFocus: null,
 	diffFocusError: null,
 	pendingDiffReferences: [],
-	expandedFiles: {},
 
 	setProject: (p) =>
 		set((state) => {
@@ -383,7 +496,6 @@ export const useApp = create<AppState>((set) => ({
 				processingSectionId: null,
 				chat: [],
 				commentDrafts: [],
-				pendingReview: null,
 				publishedComments: [],
 				publishedCommentsFetchedAt: null,
 				publishedCommentsError: null,
@@ -392,7 +504,6 @@ export const useApp = create<AppState>((set) => ({
 				diffFocus: null,
 				diffFocusError: null,
 				pendingDiffReferences: [],
-				expandedFiles: {},
 			};
 		}),
 
@@ -412,12 +523,10 @@ export const useApp = create<AppState>((set) => ({
 			sections: prDescription ? [prDescription] : [],
 			currentSectionId: prDescription ? prDescription.id : null,
 			commentDrafts: [],
-			pendingReview: null,
 			publishedComments: s?.published_comments ?? [],
 			publishedCommentsFetchedAt: s ? Date.now() : null,
 			publishedCommentsError: s?.published_comments_error ?? null,
 			pendingDiffReferences: [],
-			expandedFiles: {},
 		});
 	},
 	reset: () =>
@@ -435,7 +544,6 @@ export const useApp = create<AppState>((set) => ({
 				processingSectionId: null,
 				chat: [],
 				commentDrafts: [],
-				pendingReview: null,
 				publishedComments: [],
 				publishedCommentsFetchedAt: null,
 				publishedCommentsError: null,
@@ -444,7 +552,6 @@ export const useApp = create<AppState>((set) => ({
 				diffFocus: null,
 				diffFocusError: null,
 				pendingDiffReferences: [],
-				expandedFiles: {},
 			};
 		}),
 
@@ -461,18 +568,34 @@ export const useApp = create<AppState>((set) => ({
 				(section): section is PrDescriptionSectionState =>
 					section.kind === "pr_description",
 			);
+			const existingReviewSections = new Map(
+				state.sections
+					.filter(
+						(section): section is ReviewSectionState =>
+							section.kind === "review_section",
+					)
+					.map((section) => [section.id, section]),
+			);
 			return {
 				sections: [
 					...(prDescription ? [prDescription] : []),
-					...entries.map(
-						(e): ReviewSectionState => ({
+					...entries.map((e): ReviewSectionState => {
+						const existing = existingReviewSections.get(e.section_id);
+						const section = mergeMapEntrySection(e, existing, state.session);
+						return {
 							id: e.section_id,
 							kind: "review_section",
 							title: e.title,
 							intent: e.intent,
-							status: "pending",
-						}),
-					),
+							status:
+								existing?.status === "completed"
+									? "completed"
+									: section && hasSectionFeedback(section)
+										? "in_review"
+										: "pending",
+							section,
+						};
+					}),
 				],
 			};
 		}),
@@ -481,15 +604,24 @@ export const useApp = create<AppState>((set) => ({
 		set((state) => {
 			const sections = [...state.sections];
 			const idx = sections.findIndex((s) => s.id === section.section_id);
+			const existing =
+				idx >= 0 && sections[idx]?.kind === "review_section"
+					? sections[idx]
+					: undefined;
 			const previousCurrentId = state.currentSectionId;
 			const previousStatus = idx >= 0 ? sections[idx].status : undefined;
+			const normalizedSection = mergeSectionFeedback(
+				section,
+				existing,
+				state.session,
+			);
 			const updated: ReviewSectionState = {
 				id: section.section_id,
 				kind: "review_section",
-				title: section.title,
-				intent: section.intent,
+				title: normalizedSection.title,
+				intent: normalizedSection.intent,
 				status: "in_review",
-				section,
+				section: normalizedSection,
 			};
 			if (idx >= 0) sections[idx] = updated;
 			else sections.push(updated);
@@ -506,8 +638,9 @@ export const useApp = create<AppState>((set) => ({
 				"section.previous_current_id": previousCurrentId,
 				"section.next_current_id": nextCurrentId,
 				"section.processing_id": state.processingSectionId,
-				"section.file_count": section.files.length,
-				"section.range_count": section.ranges.length,
+				"section.file_count": normalizedSection.files.length,
+				"section.unimportant_range_count":
+					section.unimportant_ranges?.length ?? 0,
 			});
 			return {
 				sections,
@@ -516,6 +649,48 @@ export const useApp = create<AppState>((set) => ({
 					state.processingSectionId === section.section_id
 						? null
 						: state.processingSectionId,
+			};
+		}),
+
+	upsertSectionProgress: (update) =>
+		set((state) => {
+			const sections = [...state.sections];
+			const idx = sections.findIndex((s) => s.id === update.section_id);
+			const existing =
+				idx >= 0 && sections[idx]?.kind === "review_section"
+					? sections[idx]
+					: undefined;
+			const section = mergeSectionProgress(update, existing, state.session);
+			const updated: ReviewSectionState = {
+				id: update.section_id,
+				kind: "review_section",
+				title: section.title,
+				intent: section.intent,
+				status: "in_review",
+				section,
+			};
+			if (idx >= 0) sections[idx] = updated;
+			else sections.push(updated);
+			const nextCurrentId =
+				state.currentSectionId === PR_DESCRIPTION_SECTION_ID
+					? state.currentSectionId
+					: update.section_id;
+			recordClientTelemetry("client.store.section_progress.upserted", {
+				"acp.session_id": state.session?.session_id,
+				"section.id": update.section_id,
+				"section.phase": update.phase,
+				"section.index": idx,
+				"section.was_known": idx >= 0,
+				"section.previous_current_id": state.currentSectionId,
+				"section.next_current_id": nextCurrentId,
+				"section.file_count": section.files.length,
+				"section.unimportant_range_count": section.unimportant_ranges.length,
+				"section.concern_count": section.concerns.length,
+			});
+			return {
+				sections,
+				currentSectionId: nextCurrentId,
+				processingSectionId: update.section_id,
 			};
 		}),
 
@@ -747,19 +922,15 @@ export const useApp = create<AppState>((set) => ({
 				d.id === id ? { ...d, ...patch } : d,
 			),
 		})),
+	editCommentDraftBody: (id, body) =>
+		set((state) => ({
+			commentDrafts: state.commentDrafts.map((d) =>
+				d.id === id ? { ...d, draft: { ...d.draft, body } } : d,
+			),
+		})),
 	dismissCommentDraft: (id) =>
 		set((state) => ({
 			commentDrafts: state.commentDrafts.filter((d) => d.id !== id),
-		})),
-	setPendingReview: (review) => set({ pendingReview: review }),
-	clearPendingReview: () => set({ pendingReview: null }),
-	markPendingReviewSubmitted: (reviewId) =>
-		set((state) => ({
-			pendingReview:
-				state.pendingReview?.review_id === reviewId ? null : state.pendingReview,
-			commentDrafts: state.commentDrafts.filter(
-				(d) => d.pending_review_id !== reviewId,
-			),
 		})),
 
 	applyCommentResult: (result) =>
@@ -831,37 +1002,4 @@ export const useApp = create<AppState>((set) => ({
 			),
 		})),
 	clearPendingDiffReferences: () => set({ pendingDiffReferences: [] }),
-
-	toggleFileExpanded: (filePath) =>
-		set((state) => {
-			const next = { ...state.expandedFiles };
-			if (next[filePath]) delete next[filePath];
-			else next[filePath] = true;
-			return { expandedFiles: next };
-		}),
-	expandFile: (filePath) =>
-		set((state) =>
-			state.expandedFiles[filePath]
-				? {}
-				: { expandedFiles: { ...state.expandedFiles, [filePath]: true } },
-		),
-	expandFiles: (filePaths) =>
-		set((state) => {
-			if (filePaths.length === 0) return {};
-			const next = { ...state.expandedFiles };
-			let changed = false;
-			for (const path of filePaths) {
-				if (!next[path]) {
-					next[path] = true;
-					changed = true;
-				}
-			}
-			return changed ? { expandedFiles: next } : {};
-		}),
-	collapseAllFiles: () =>
-		set((state) =>
-			Object.keys(state.expandedFiles).length === 0
-				? {}
-				: { expandedFiles: {} },
-		),
 }));
