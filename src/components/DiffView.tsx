@@ -11,6 +11,7 @@ import {
 import { useApp } from "@/lib/store";
 import { acp } from "@/lib/acp";
 import { SeverityBadge } from "./SeverityBadge";
+import type { UnimportantRange } from "@/lib/types/section";
 import {
 	createDiffFocusRange,
 	focusSideToPierreSide,
@@ -22,6 +23,7 @@ import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemet
 import {
 	publishedCommentToDiffAnnotation,
 	type PublishedCommentAnnotationMetadata,
+	formatPublishedCommentsForPrompt,
 } from "@/lib/publishedComments";
 import {
 	sectionFeedbackToDiffAnnotations,
@@ -29,8 +31,15 @@ import {
 	type SectionFeedbackAnnotationMetadata,
 	type SectionFeedbackNote,
 } from "@/lib/sectionFeedback";
+import {
+	applyUnimportantRangeFolds,
+	protectedLinesFromAnnotations,
+	rangeFoldId,
+	visibleUnimportantRangesForFile,
+} from "@/lib/unimportantRanges";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { stripMarkdownForSummary } from "@/lib/markdownContent";
+import type { ReviewSection } from "@/lib/types/section";
 
 interface FileBundle {
 	file_path: string;
@@ -43,6 +52,14 @@ const fileCache = new Map<string, string>();
 type DiffAnnotationMetadata =
 	| PublishedCommentAnnotationMetadata
 	| SectionFeedbackAnnotationMetadata;
+
+function reviewSectionHasFeedback(section: ReviewSection): boolean {
+	return (
+		section.concerns.length > 0 ||
+		section.uncovered_scenarios.length > 0 ||
+		section.test_coverage_notes.trim().length > 0
+	);
+}
 
 async function fetchFile(
 	repoPath: string,
@@ -161,10 +178,16 @@ function SectionNotesPanel({ notes }: { notes: SectionFeedbackNote[] }) {
 
 function DiffFileCard({
 	bundle,
+	collapsed,
 	sectionFeedbackAnnotations,
+	toggleFileCollapsed,
+	unimportantRanges,
 }: {
 	bundle: FileBundle;
+	collapsed: boolean;
 	sectionFeedbackAnnotations: DiffLineAnnotation<SectionFeedbackAnnotationMetadata>[];
+	toggleFileCollapsed: (filePath: string) => void;
+	unimportantRanges: UnimportantRange[];
 }) {
 	const agentFocus = useApp((s) =>
 		s.diffFocus?.source === "agent" && s.diffFocus.file_path === bundle.file_path
@@ -173,8 +196,12 @@ function DiffFileCard({
 	);
 	const pendingDiffReferences = useApp((s) => s.pendingDiffReferences);
 	const publishedComments = useApp((s) => s.publishedComments);
-	const expanded = useApp((s) => Boolean(s.expandedFiles[bundle.file_path]));
-	const toggleFileExpanded = useApp((s) => s.toggleFileExpanded);
+	const [revealedUnimportantRanges, setRevealedUnimportantRanges] = useState<
+		Record<string, true>
+	>({});
+	useEffect(() => {
+		setRevealedUnimportantRanges({});
+	}, [bundle.file_path, unimportantRanges]);
 
 	const pendingForFile = useMemo(
 		() =>
@@ -217,6 +244,23 @@ function DiffFileCard({
 		},
 		[publishedComments, sectionFeedbackAnnotations, bundle.file_path],
 	);
+	const visibleUnimportantRanges = useMemo(
+		() =>
+			visibleUnimportantRangesForFile(
+				unimportantRanges,
+				bundle.file_path,
+			).filter((range) => !revealedUnimportantRanges[rangeFoldId(range)]),
+		[unimportantRanges, bundle.file_path, revealedUnimportantRanges],
+	);
+	const protectedLines = useMemo(
+		() => protectedLinesFromAnnotations(lineAnnotations, selectedLines),
+		[lineAnnotations, selectedLines],
+	);
+	const revealUnimportantRange = useCallback((id: string) => {
+		setRevealedUnimportantRanges((current) =>
+			current[id] ? current : { ...current, [id]: true },
+		);
+	}, []);
 
 	const onLineSelected = useCallback(
 		(range: SelectedLineRange | null) => {
@@ -266,21 +310,21 @@ function DiffFileCard({
 	const hasAgentNotes = sectionFeedbackAnnotations.some(
 		(annotation) => annotation.metadata.file_path === bundle.file_path,
 	);
-	const ChevronIcon = expanded ? ChevronDown : ChevronRight;
+	const ChevronIcon = collapsed ? ChevronRight : ChevronDown;
 
 	const renderHeaderPrefix = useCallback(
 		() => (
 			<button
 				type="button"
-				onClick={() => toggleFileExpanded(bundle.file_path)}
-				aria-expanded={expanded}
-				title={expanded ? "Collapse file" : "Expand file"}
+				onClick={() => toggleFileCollapsed(bundle.file_path)}
+				aria-expanded={!collapsed}
+				title={collapsed ? "Expand file" : "Collapse file"}
 				className="-ml-1 inline-flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-muted focus:outline-none focus-visible:ring-1 focus-visible:ring-primary"
 			>
 				<ChevronIcon className="size-3.5" />
 			</button>
 		),
-		[ChevronIcon, bundle.file_path, expanded, toggleFileExpanded],
+		[ChevronIcon, bundle.file_path, collapsed, toggleFileCollapsed],
 	);
 
 	const renderHeaderMetadata = useCallback(() => {
@@ -304,22 +348,34 @@ function DiffFileCard({
 			</span>
 		);
 	}, [hasAgentNotes, noteCount]);
+	const onPostRender = useCallback(
+		(node: HTMLElement) => {
+			applyUnimportantRangeFolds(
+				node,
+				visibleUnimportantRanges,
+				protectedLines,
+				revealUnimportantRange,
+			);
+		},
+		[protectedLines, revealUnimportantRange, visibleUnimportantRanges],
+	);
 
 	const options = useMemo(
 		() => ({
 			theme: "pierre-dark" as const,
 			diffStyle: "unified" as const,
 			enableLineSelection: true,
-			collapsed: !expanded,
+			collapsed,
 			onLineSelected,
+			onPostRender,
 		}),
-		[expanded, onLineSelected],
+		[collapsed, onLineSelected, onPostRender],
 	);
 
 	return (
 		<div
 			data-file-path={bundle.file_path}
-			data-expanded={expanded ? "true" : "false"}
+			data-expanded={collapsed ? "false" : "true"}
 			className="relative overflow-hidden rounded-md border border-border bg-card"
 		>
 			<MultiFileDiff
@@ -340,13 +396,14 @@ export function DiffPane() {
 	const session = useApp((s) => s.session);
 	const currentId = useApp((s) => s.currentSectionId);
 	const sections = useApp((s) => s.sections);
+	const processingSectionId = useApp((s) => s.processingSectionId);
 	const diffFocus = useApp((s) => s.diffFocus);
 	const diffFocusError = useApp((s) => s.diffFocusError);
 	const clearDiffFocus = useApp((s) => s.clearDiffFocus);
 	const setDiffFocusError = useApp((s) => s.setDiffFocusError);
-	const expandFile = useApp((s) => s.expandFile);
-	const expandFiles = useApp((s) => s.expandFiles);
-	const collapseAllFiles = useApp((s) => s.collapseAllFiles);
+	const startSectionProcessing = useApp((s) => s.startSectionProcessing);
+	const finishSectionProcessing = useApp((s) => s.finishSectionProcessing);
+	const pushError = useApp((s) => s.pushError);
 	const publishedComments = useApp((s) => s.publishedComments);
 
 	const current = useMemo(
@@ -355,11 +412,76 @@ export function DiffPane() {
 	);
 	const section =
 		current?.kind === "review_section" ? current.section ?? null : null;
+	const currentReviewId = current?.kind === "review_section" ? current.id : null;
+	const sectionIsProcessing = processingSectionId === currentReviewId;
+	const canRequestFeedback = Boolean(
+		session &&
+			current?.kind === "review_section" &&
+			!sectionIsProcessing &&
+			(!section || !reviewSectionHasFeedback(section)),
+	);
 
 	const [bundles, setBundles] = useState<FileBundle[]>([]);
 	const [loading, setLoading] = useState(false);
 	const [loadError, setLoadError] = useState<string | null>(null);
 	const [agentFocusLabel, setAgentFocusLabel] = useState<string | null>(null);
+	const [collapsedFiles, setCollapsedFiles] = useState<Record<string, true>>({});
+	const openFiles = useCallback((filePaths: string[]) => {
+		setCollapsedFiles((current) => {
+			let changed = false;
+			const next = { ...current };
+			for (const filePath of filePaths) {
+				if (next[filePath]) {
+					delete next[filePath];
+					changed = true;
+				}
+			}
+			return changed ? next : current;
+		});
+	}, []);
+	const requestSectionFeedback = useCallback(async () => {
+		if (!session || current?.kind !== "review_section") return;
+		const sectionId = current.id;
+		startSectionProcessing(sectionId);
+		try {
+			recordClientTelemetry("client.diff.feedback_request.started", {
+				"acp.session_id": session.session_id,
+				"section.id": sectionId,
+			});
+			const publishedCommentContext = formatPublishedCommentsForPrompt(
+				publishedComments,
+				session.published_comments_error,
+			);
+			await acp.sendMessage(
+				session.session_id,
+				`Walk me through the section "${current.title}" (\`${sectionId}\`).\n\n${publishedCommentContext}\n\nEmit one feedback-only acp-section block for it and stop. Do not include files, ranges, unimportant_ranges, base_ref, or head_ref.`,
+				{
+					origin: "section_feedback_button",
+					sectionId,
+					reason: "load_section_feedback",
+					suppressPreview: true,
+				},
+			);
+			recordClientTelemetry("client.diff.feedback_request.sent", {
+				"acp.session_id": session.session_id,
+				"section.id": sectionId,
+			});
+		} catch (e) {
+			finishSectionProcessing(sectionId);
+			recordClientTelemetryError("client.diff.feedback_request.failed", e, {
+				"acp.session_id": session.session_id,
+				"section.id": sectionId,
+			});
+			pushError(`feedback load failed: ${e}`);
+		}
+	}, [
+		session,
+		current,
+		startSectionProcessing,
+		finishSectionProcessing,
+		publishedComments,
+		pushError,
+	]);
 	const visibleFilePaths = useMemo(
 		() => new Set(bundles.map((bundle) => bundle.file_path)),
 		[bundles],
@@ -397,8 +519,8 @@ export function DiffPane() {
 	useEffect(() => {
 		if (!diffFocus) return;
 		if (!visibleFilePaths.has(diffFocus.file_path)) return;
-		expandFile(diffFocus.file_path);
-	}, [diffFocus, visibleFilePaths, expandFile]);
+		openFiles([diffFocus.file_path]);
+	}, [diffFocus, visibleFilePaths, openFiles]);
 
 	const filesWithNotes = useMemo(() => {
 		const set = new Set<string>();
@@ -420,28 +542,46 @@ export function DiffPane() {
 
 	const autoExpandedSectionsRef = useRef<Set<string>>(new Set());
 	const sectionId = section?.section_id ?? null;
+	const allFilePaths = useMemo(
+		() => bundles.map((bundle) => bundle.file_path),
+		[bundles],
+	);
+	useEffect(() => {
+		setCollapsedFiles({});
+	}, [sectionId]);
+
 	useEffect(() => {
 		if (!sectionId) return;
 		if (bundles.length === 0) return;
 		if (autoExpandedSectionsRef.current.has(sectionId)) return;
 		autoExpandedSectionsRef.current.add(sectionId);
 		if (filesWithNotes.length > 0) {
-			expandFiles(filesWithNotes);
+			openFiles(filesWithNotes);
 		}
-	}, [sectionId, bundles, filesWithNotes, expandFiles]);
+	}, [sectionId, bundles, filesWithNotes, openFiles]);
 
-	const allFilePaths = useMemo(
-		() => bundles.map((bundle) => bundle.file_path),
-		[bundles],
-	);
 	const expandAll = useCallback(
-		() => expandFiles(allFilePaths),
-		[expandFiles, allFilePaths],
+		() => openFiles(allFilePaths),
+		[openFiles, allFilePaths],
 	);
 	const collapseAll = useCallback(
-		() => collapseAllFiles(),
-		[collapseAllFiles],
+		() => {
+			const next: Record<string, true> = {};
+			for (const filePath of allFilePaths) {
+				next[filePath] = true;
+			}
+			setCollapsedFiles(next);
+		},
+		[allFilePaths],
 	);
+	const toggleFileCollapsed = useCallback((filePath: string) => {
+		setCollapsedFiles((current) => {
+			const next = { ...current };
+			if (next[filePath]) delete next[filePath];
+			else next[filePath] = true;
+			return next;
+		});
+	}, []);
 
 	useEffect(() => {
 		if (allFilePaths.length === 0) return;
@@ -598,6 +738,16 @@ export function DiffPane() {
 				<p className="mt-3 text-xs">
 					Ask the agent to walk you through this section.
 				</p>
+				{canRequestFeedback && (
+					<button
+						type="button"
+						onClick={requestSectionFeedback}
+						className="mt-4 inline-flex items-center gap-1.5 rounded border border-border bg-card/70 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent"
+					>
+						<Sparkles className="size-3.5 text-primary" />
+						<span>Load feedback</span>
+					</button>
+				)}
 			</section>
 		);
 	}
@@ -620,6 +770,16 @@ export function DiffPane() {
 						{section!.head_ref}
 					</span>
 				</div>
+				{canRequestFeedback && (
+					<button
+						type="button"
+						onClick={requestSectionFeedback}
+						className="mt-3 inline-flex items-center gap-1.5 rounded border border-border bg-background/70 px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-accent"
+					>
+						<Sparkles className="size-3.5 text-primary" />
+						<span>Load feedback</span>
+					</button>
+				)}
 				{agentFocusLabel && (
 					<div className="mt-2 inline-flex items-center gap-1.5 rounded border border-primary/40 bg-primary/10 px-2 py-1 font-mono text-[11px] text-primary">
 						<LocateFixed className="size-3" />
@@ -645,7 +805,19 @@ export function DiffPane() {
 				{!loading && !loadError && (
 					<SectionNotesPanel notes={sectionTopNotes} />
 				)}
-				{!loading && !loadError && bundles.length === 0 && (
+				{!loading &&
+					!loadError &&
+					bundles.length === 0 &&
+					sectionIsProcessing &&
+					section!.files.length === 0 && (
+						<div className="rounded-md border border-border bg-card/40 px-4 py-3 text-sm text-muted-foreground">
+							Agent is finding files and ranges for this section…
+						</div>
+					)}
+				{!loading &&
+					!loadError &&
+					bundles.length === 0 &&
+					!(sectionIsProcessing && section!.files.length === 0) && (
 					<div className="rounded-md border border-border bg-card/40 px-4 py-3 text-sm text-muted-foreground">
 						No textual changes in the listed files.
 					</div>
@@ -680,7 +852,10 @@ export function DiffPane() {
 					<DiffFileCard
 						key={b.file_path}
 						bundle={b}
+						collapsed={Boolean(collapsedFiles[b.file_path])}
 						sectionFeedbackAnnotations={sectionFeedbackAnnotations}
+						toggleFileCollapsed={toggleFileCollapsed}
+						unimportantRanges={section!.unimportant_ranges ?? []}
 					/>
 				))}
 			</div>

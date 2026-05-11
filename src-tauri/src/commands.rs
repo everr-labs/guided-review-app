@@ -3,14 +3,14 @@ use crate::agent_runner::{list_agents, AgentInfo, AgentKind};
 use crate::gh::{check_installation, GhCliStatus};
 use crate::projects::{self, RecentProject};
 use crate::repo::{
-    add_pending_review_thread, create_pending_review, fetch_pull_request_metadata,
-    fetch_pull_request_review_comments, get_diff, get_file_at_ref, inspect_origin, parse_pr_url,
-    resolve_source, submit_pending_review, update_pending_review_body, ClonedRepo, DiffPatch,
-    GithubRepoInfo, PendingReview, PendingReviewComment, PublishedPrComment, PullRequestMetadata,
-    SessionSource,
+    fetch_pull_request_metadata, fetch_pull_request_review_comments, get_changed_ranges, get_diff,
+    get_file_at_ref, inspect_origin, parse_pr_url, resolve_source, ClonedRepo, DiffPatch,
+    GithubRepoInfo, PublishedPrComment, PullRequestMetadata, SessionSource,
 };
+use crate::section::LineRange;
+use crate::telemetry::{self, TelemetryContext};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 use tracing::Instrument;
 
@@ -31,21 +31,44 @@ pub struct StartSessionResponse {
     pub published_comments_error: Option<String>,
 }
 
-const AGENT_SKILL: &str = include_str!("../../agent-skill.md");
+const AGENT_SKILL: &str = include_str!(".././agent-skill.md");
+
+fn command_span(
+    command: &'static str,
+    telemetry_context: Option<&TelemetryContext>,
+) -> tracing::Span {
+    let span = tracing::info_span!("tauri.command", command);
+    telemetry::set_span_parent(&span, telemetry_context);
+    span
+}
+
+fn read_agent_skill_from_disk(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+fn agent_skill() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("agent-skill.md");
+    read_agent_skill_from_disk(&path).unwrap_or_else(|| AGENT_SKILL.to_string())
+}
 
 #[tauri::command]
-pub async fn list_agents_cmd() -> Vec<AgentInfo> {
+pub async fn list_agents_cmd(telemetry_context: Option<TelemetryContext>) -> Vec<AgentInfo> {
+    let span = command_span("list_agents_cmd", telemetry_context.as_ref());
+    let _enter = span.enter();
     list_agents()
 }
 
 #[tauri::command]
-pub async fn agent_skill_cmd() -> &'static str {
-    AGENT_SKILL
+pub async fn agent_skill_cmd(telemetry_context: Option<TelemetryContext>) -> String {
+    let span = command_span("agent_skill_cmd", telemetry_context.as_ref());
+    let _enter = span.enter();
+    agent_skill()
 }
 
 #[tauri::command]
-pub async fn check_gh_cli_cmd() -> GhCliStatus {
-    check_installation().await
+pub async fn check_gh_cli_cmd(telemetry_context: Option<TelemetryContext>) -> GhCliStatus {
+    let span = command_span("check_gh_cli_cmd", telemetry_context.as_ref());
+    async { check_installation().await }.instrument(span).await
 }
 
 #[tauri::command]
@@ -53,12 +76,14 @@ pub async fn start_session_cmd(
     app: AppHandle,
     sessions: State<'_, AcpSessions>,
     req: StartSessionRequest,
+    telemetry_context: Option<TelemetryContext>,
 ) -> Result<StartSessionResponse, String> {
     let span = tracing::info_span!(
         "session.start",
         agent = ?req.agent_kind,
         source = ?req.source,
     );
+    telemetry::set_span_parent(&span, telemetry_context.as_ref());
     async move {
         let cloned = resolve_source(&req.source)
             .await
@@ -206,30 +231,53 @@ fn chrono_now() -> i64 {
 }
 
 #[tauri::command]
-pub async fn parse_pr_url_cmd(url: String) -> Option<(String, String, u64)> {
+pub async fn parse_pr_url_cmd(
+    url: String,
+    telemetry_context: Option<TelemetryContext>,
+) -> Option<(String, String, u64)> {
+    let span = command_span("parse_pr_url_cmd", telemetry_context.as_ref());
+    let _enter = span.enter();
     parse_pr_url(&url)
 }
 
 #[tauri::command]
-pub async fn list_recent_projects_cmd() -> Vec<RecentProject> {
-    projects::load().await.unwrap_or_default()
-}
-
-#[tauri::command]
-pub async fn inspect_local_repo_origin_cmd(path: PathBuf) -> Result<GithubRepoInfo, String> {
-    inspect_origin(&path).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn record_recent_project_cmd(project: RecentProject) -> Result<(), String> {
-    projects::record(project)
+pub async fn list_recent_projects_cmd(
+    telemetry_context: Option<TelemetryContext>,
+) -> Vec<RecentProject> {
+    let span = command_span("list_recent_projects_cmd", telemetry_context.as_ref());
+    async { projects::load().await.unwrap_or_default() }
+        .instrument(span)
         .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-#[tracing::instrument(skip(sessions, text), fields(session_id = %session_id))]
+pub async fn inspect_local_repo_origin_cmd(
+    path: PathBuf,
+    telemetry_context: Option<TelemetryContext>,
+) -> Result<GithubRepoInfo, String> {
+    let span = command_span("inspect_local_repo_origin_cmd", telemetry_context.as_ref());
+    async { inspect_origin(&path).await.map_err(|e| e.to_string()) }
+        .instrument(span)
+        .await
+}
+
+#[tauri::command]
+pub async fn record_recent_project_cmd(
+    project: RecentProject,
+    telemetry_context: Option<TelemetryContext>,
+) -> Result<(), String> {
+    let span = command_span("record_recent_project_cmd", telemetry_context.as_ref());
+    async {
+        projects::record(project)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    .instrument(span)
+    .await
+}
+
+#[tauri::command]
 pub async fn send_message_cmd(
     sessions: State<'_, AcpSessions>,
     session_id: String,
@@ -238,32 +286,45 @@ pub async fn send_message_cmd(
     reason: Option<String>,
     section_id: Option<String>,
     suppress_preview: Option<bool>,
+    telemetry_context: Option<TelemetryContext>,
 ) -> Result<(), String> {
-    let sess = sessions
-        .get(&session_id)
-        .await
-        .ok_or_else(|| "unknown session".to_string())?;
-    tracing::info!(
-        len = text.len(),
-        origin = origin.as_deref().unwrap_or("unknown"),
-        reason = reason.as_deref().unwrap_or("unknown"),
-        section_id = section_id.as_deref().unwrap_or(""),
-        suppress_preview = suppress_preview.unwrap_or(false),
-        "user prompt",
-    );
-    sess.send_prompt(text, origin, reason, section_id)
-        .map_err(|e| e.to_string())
+    let span = tracing::info_span!("message.send", session_id = %session_id);
+    telemetry::set_span_parent(&span, telemetry_context.as_ref());
+    async move {
+        let sess = sessions
+            .get(&session_id)
+            .await
+            .ok_or_else(|| "unknown session".to_string())?;
+        tracing::info!(
+            len = text.len(),
+            origin = origin.as_deref().unwrap_or("unknown"),
+            reason = reason.as_deref().unwrap_or("unknown"),
+            section_id = section_id.as_deref().unwrap_or(""),
+            suppress_preview = suppress_preview.unwrap_or(false),
+            "user prompt",
+        );
+        sess.send_prompt(text, origin, reason, section_id)
+            .map_err(|e| e.to_string())
+    }
+    .instrument(span)
+    .await
 }
 
 #[tauri::command]
 pub async fn end_session_cmd(
     sessions: State<'_, AcpSessions>,
     session_id: String,
+    telemetry_context: Option<TelemetryContext>,
 ) -> Result<(), String> {
-    if let Some(sess) = sessions.remove(&session_id).await {
-        sess.join.abort();
+    let span = command_span("end_session_cmd", telemetry_context.as_ref());
+    async move {
+        if let Some(sess) = sessions.remove(&session_id).await {
+            sess.join.abort();
+        }
+        Ok(())
     }
-    Ok(())
+    .instrument(span)
+    .await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,14 +335,22 @@ pub struct GetFileAtRefArgs {
 }
 
 #[tauri::command]
-pub async fn get_file_at_ref_cmd(args: GetFileAtRefArgs) -> Result<Option<String>, String> {
-    let path = args.repo_path;
-    let file = args.file_path;
-    let refspec = args.refspec;
-    tokio::task::spawn_blocking(move || get_file_at_ref(&path, &file, &refspec))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+pub async fn get_file_at_ref_cmd(
+    args: GetFileAtRefArgs,
+    telemetry_context: Option<TelemetryContext>,
+) -> Result<Option<String>, String> {
+    let span = command_span("get_file_at_ref_cmd", telemetry_context.as_ref());
+    async move {
+        let path = args.repo_path;
+        let file = args.file_path;
+        let refspec = args.refspec;
+        tokio::task::spawn_blocking(move || get_file_at_ref(&path, &file, &refspec))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+    .instrument(span)
+    .await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,112 +362,71 @@ pub struct GetDiffArgs {
 }
 
 #[tauri::command]
-pub async fn get_diff_cmd(args: GetDiffArgs) -> Result<Vec<DiffPatch>, String> {
-    let path = args.repo_path;
-    let base = args.base_ref;
-    let head = args.head_ref;
-    let file = args.file_path;
-    tokio::task::spawn_blocking(move || get_diff(&path, &base, &head, file.as_deref()))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+pub async fn get_diff_cmd(
+    args: GetDiffArgs,
+    telemetry_context: Option<TelemetryContext>,
+) -> Result<Vec<DiffPatch>, String> {
+    let span = command_span("get_diff_cmd", telemetry_context.as_ref());
+    async move {
+        let path = args.repo_path;
+        let base = args.base_ref;
+        let head = args.head_ref;
+        let file = args.file_path;
+        tokio::task::spawn_blocking(move || get_diff(&path, &base, &head, file.as_deref()))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+    .instrument(span)
+    .await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrTarget {
-    pub owner: String,
-    pub repo: String,
-    pub number: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreatePendingReviewArgs {
-    pub target: PrTarget,
-    pub head_sha: String,
-    pub body: String,
+pub struct GetChangedRangesArgs {
+    pub repo_path: PathBuf,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub file_paths: Vec<String>,
 }
 
 #[tauri::command]
-pub async fn create_pending_review_cmd(
-    args: CreatePendingReviewArgs,
-) -> Result<PendingReview, String> {
-    create_pending_review(
-        &args.target.owner,
-        &args.target.repo,
-        args.target.number,
-        &args.head_sha,
-        &args.body,
-    )
+pub async fn get_changed_ranges_cmd(
+    args: GetChangedRangesArgs,
+    telemetry_context: Option<TelemetryContext>,
+) -> Result<Vec<LineRange>, String> {
+    let span = command_span("get_changed_ranges_cmd", telemetry_context.as_ref());
+    async move {
+        let path = args.repo_path;
+        let base = args.base_ref;
+        let head = args.head_ref;
+        let files = args.file_paths;
+        tokio::task::spawn_blocking(move || get_changed_ranges(&path, &base, &head, &files))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+    .instrument(span)
     .await
-    .map_err(|e| e.to_string())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddPendingReviewThreadArgs {
-    pub target: PrTarget,
-    pub review_node_id: String,
-    pub body: String,
-    pub file_path: String,
-    pub line: u32,
-    pub side: String,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-#[tauri::command]
-pub async fn add_pending_review_thread_cmd(
-    args: AddPendingReviewThreadArgs,
-) -> Result<PendingReviewComment, String> {
-    let _target = args.target;
-    add_pending_review_thread(
-        &args.review_node_id,
-        &args.body,
-        &args.file_path,
-        args.line,
-        &args.side,
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
+    #[test]
+    fn reads_agent_skill_from_disk_when_available() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("guided-review-agent-skill-{unique}.md"));
+        fs::write(&path, "fresh skill from disk").expect("write test skill");
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdatePendingReviewBodyArgs {
-    pub target: PrTarget,
-    pub review_id: u64,
-    pub body: String,
-}
+        let skill = read_agent_skill_from_disk(&path);
 
-#[tauri::command]
-pub async fn update_pending_review_body_cmd(
-    args: UpdatePendingReviewBodyArgs,
-) -> Result<PendingReview, String> {
-    update_pending_review_body(
-        &args.target.owner,
-        &args.target.repo,
-        args.target.number,
-        args.review_id,
-        &args.body,
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmitPendingReviewArgs {
-    pub target: PrTarget,
-    pub review_id: u64,
-    pub body: String,
-}
-
-#[tauri::command]
-pub async fn submit_pending_review_cmd(
-    args: SubmitPendingReviewArgs,
-) -> Result<PendingReview, String> {
-    submit_pending_review(
-        &args.target.owner,
-        &args.target.repo,
-        args.target.number,
-        args.review_id,
-        &args.body,
-    )
-    .await
-    .map_err(|e| e.to_string())
+        fs::remove_file(&path).expect("remove test skill");
+        assert_eq!(skill.as_deref(), Some("fresh skill from disk"));
+    }
 }

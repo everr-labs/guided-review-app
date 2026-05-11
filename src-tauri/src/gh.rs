@@ -5,7 +5,6 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 const PATH_BEGIN_MARKER: &str = "__GUIDED_REVIEW_GH_PATH_BEGIN__";
@@ -29,16 +28,8 @@ pub struct GhCliStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GhApiJsonRequest {
-    pub method: String,
-    pub path: String,
-    pub body: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GhInvocation {
     pub args: Vec<String>,
-    pub stdin_json: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,29 +40,12 @@ struct PreparedGhCommand {
 
 impl GhInvocation {
     pub fn args(args: Vec<String>) -> Self {
-        Self {
-            args,
-            stdin_json: None,
-        }
-    }
-
-    pub fn api_json(request: &GhApiJsonRequest) -> Self {
-        Self {
-            args: vec![
-                "api".to_string(),
-                "--method".to_string(),
-                request.method.clone(),
-                request.path.clone(),
-                "--input".to_string(),
-                "-".to_string(),
-            ],
-            stdin_json: Some(request.body.clone()),
-        }
+        Self { args }
     }
 }
 
 pub fn missing_gh_message() -> &'static str {
-    "GitHub CLI (`gh`) is not installed or could not be found in PATH. Install GitHub CLI to fetch PR details, read review comments, and publish review comments."
+    "GitHub CLI (`gh`) is not installed or could not be found in PATH. Install GitHub CLI to fetch PR details and read review comments."
 }
 
 pub fn parse_gh_version(raw: &str) -> Option<String> {
@@ -129,26 +103,17 @@ pub async fn output(args: &[String]) -> Result<String> {
     run(GhInvocation::args(args.to_vec())).await
 }
 
-pub async fn api_json(request: GhApiJsonRequest) -> Result<String> {
-    run(GhInvocation::api_json(&request)).await
-}
-
 async fn run(invocation: GhInvocation) -> Result<String> {
     let prepared = prepare_gh_command()?;
-    let stdin_json = invocation.stdin_json;
     let mut command = Command::new(&prepared.program);
     command
         .args(&invocation.args)
         .env("PATH", &prepared.path_env)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if stdin_json.is_some() {
-        command.stdin(Stdio::piped());
-    } else {
-        command.stdin(Stdio::null());
-    }
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
 
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|e| {
             if e.kind() == ErrorKind::NotFound {
@@ -158,15 +123,6 @@ async fn run(invocation: GhInvocation) -> Result<String> {
             }
         })
         .with_context(|| format!("running gh {:?}", invocation.args))?;
-
-    if let Some(body) = stdin_json {
-        let bytes = serde_json::to_vec(&body)?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("gh stdin was not available"))?;
-        stdin.write_all(&bytes).await?;
-    }
 
     let out = child
         .wait_with_output()
@@ -299,30 +255,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn api_json_invocation_uses_stdin_and_method() {
-        let request = GhApiJsonRequest {
-            method: "PATCH".to_string(),
-            path: "/repos/garden-co/jazz/pulls/787/reviews/44".to_string(),
-            body: serde_json::json!({ "body": "Summary note." }),
-        };
-
-        let invocation = GhInvocation::api_json(&request);
-
-        assert_eq!(
-            invocation.args,
-            vec![
-                "api",
-                "--method",
-                "PATCH",
-                "/repos/garden-co/jazz/pulls/787/reviews/44",
-                "--input",
-                "-"
-            ]
-        );
-        assert_eq!(invocation.stdin_json, Some(request.body));
-    }
-
-    #[test]
     fn parse_version_reads_first_gh_version_line() {
         assert_eq!(
             parse_gh_version("gh version 2.65.0 (2026-01-01)\nhttps://github.com/cli/cli"),
@@ -334,7 +266,7 @@ mod tests {
     fn missing_gh_message_is_actionable() {
         assert_eq!(
             missing_gh_message(),
-            "GitHub CLI (`gh`) is not installed or could not be found in PATH. Install GitHub CLI to fetch PR details, read review comments, and publish review comments."
+            "GitHub CLI (`gh`) is not installed or could not be found in PATH. Install GitHub CLI to fetch PR details and read review comments."
         );
     }
 

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { useApp } from "@/lib/store";
+import { useApp, type SessionInfo } from "@/lib/store";
 import {
 	on,
 	acp,
 	type SectionMapEvent,
 	type SectionEvent,
+	type SectionProgressEvent,
 	type TextChunkEvent,
 	type TurnDoneEvent,
 	type ErrorEvent,
@@ -17,14 +18,16 @@ import {
 	type GhCliStatus,
 } from "@/lib/acp";
 import type {
-	Concern,
-	LineRange,
-	RangeKind,
 	ReviewSection,
 	SectionMap,
 	SectionMapEntry,
-	Severity,
+	SectionProgressUpdate,
 } from "@/lib/types/section";
+import {
+	parseReviewSectionPayload,
+	parseSectionMapPayload,
+	parseSectionProgressPayload,
+} from "@/lib/reviewSectionPayload";
 import { ProjectPicker } from "@/components/ProjectPicker";
 import { ReviewLauncher } from "@/components/ReviewLauncher";
 import { SectionList } from "@/components/SectionList";
@@ -47,124 +50,53 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-	return value && typeof value === "object"
-		? (value as Record<string, unknown>)
-		: null;
-}
-
-function asString(value: unknown): string | null {
-	return typeof value === "string" ? value : null;
-}
-
-function asNumber(value: unknown): number | null {
-	return typeof value === "number" ? value : null;
-}
-
-function asStringArray(value: unknown): string[] {
-	return Array.isArray(value)
-		? value.filter((item): item is string => typeof item === "string")
-		: [];
-}
-
-const severities: Severity[] = ["high", "medium", "low"];
-const rangeKinds: RangeKind[] = [
-	"context",
-	"changed-old",
-	"changed-new",
-	"added",
-	"removed",
-];
-
-function parseSeverity(value: unknown): Severity | null {
-	return severities.includes(value as Severity) ? (value as Severity) : null;
-}
-
-function parseRangeKind(value: unknown): RangeKind | null {
-	return rangeKinds.includes(value as RangeKind) ? (value as RangeKind) : null;
-}
-
-function parseSectionMapEntry(value: unknown): SectionMapEntry | null {
-	const record = asRecord(value);
-	if (!record) return null;
-	const section_id = asString(record.section_id);
-	const title = asString(record.title);
-	const intent = asString(record.intent);
-	if (!section_id || !title || !intent) return null;
-	return { section_id, title, intent };
-}
-
-function parseLineRange(value: unknown): LineRange | null {
-	const record = asRecord(value);
-	if (!record) return null;
-	const file_path = asString(record.file_path);
-	const start_line = asNumber(record.start_line);
-	const end_line = asNumber(record.end_line);
-	const kind = parseRangeKind(record.kind);
-	if (!file_path || start_line === null || end_line === null || !kind) {
-		return null;
-	}
-	return { file_path, start_line, end_line, kind };
-}
-
-function parseConcern(value: unknown): Concern | null {
-	const record = asRecord(value);
-	if (!record) return null;
-	const text = asString(record.text);
-	const severity = parseSeverity(record.severity);
-	if (!text || !severity) return null;
-	return {
-		text,
-		severity,
-		file_path: asString(record.file_path) ?? undefined,
-		line: asNumber(record.line) ?? undefined,
-	};
-}
-
-function parseArray<T>(
-	value: unknown,
-	parse: (entry: unknown) => T | null,
-): T[] {
-	return Array.isArray(value)
-		? value.map(parse).filter((entry): entry is T => entry !== null)
-		: [];
-}
-
 function parseToolSectionMap(raw: unknown): SectionMap | null {
-	const record = asRecord(raw);
-	if (!record || !Array.isArray(record.sections)) return null;
-	const sections = parseArray(record.sections, parseSectionMapEntry);
-	if (sections.length !== record.sections.length) return null;
-	return {
-		schema_version: 1,
-		sections,
-	};
+	return parseSectionMapPayload(raw);
 }
 
 function parseToolReviewSection(raw: unknown): ReviewSection | null {
-	const record = asRecord(raw);
-	if (!record) return null;
-	const section_id = asString(record.section_id);
-	const title = asString(record.title);
-	const intent = asString(record.intent);
-	if (!section_id || !title || !intent) return null;
-	return {
-		schema_version: 1,
-		section_id,
-		title,
-		intent,
-		files: asStringArray(record.files),
-		ranges: parseArray(record.ranges, parseLineRange),
-		concerns: parseArray(record.concerns, parseConcern),
-		uncovered_scenarios: parseArray(
-			record.uncovered_scenarios,
-			parseConcern,
-		),
-		test_coverage_notes: asString(record.test_coverage_notes) ?? "",
-		base_ref: asString(record.base_ref) ?? "",
-		head_ref: asString(record.head_ref) ?? "",
-		pause_prompt: asString(record.pause_prompt) ?? "",
-	};
+	return parseReviewSectionPayload(raw);
+}
+
+function parseToolSectionProgress(raw: unknown): SectionProgressUpdate | null {
+	return parseSectionProgressPayload(raw);
+}
+
+async function enrichSectionMapWithLocalRanges(
+	session: SessionInfo,
+	sections: SectionMapEntry[],
+): Promise<SectionMapEntry[]> {
+	return Promise.all(
+		sections.map(async (section) => {
+			const files = section.files ?? [];
+			if (files.length === 0) return section;
+			try {
+				recordClientTelemetry("client.acp.section_map.ranges.started", {
+					"acp.session_id": session.session_id,
+					"section.id": section.section_id,
+					"section.file_count": files.length,
+				});
+				const ranges = await acp.getChangedRanges({
+					repo_path: session.repo.path,
+					base_ref: session.repo.base_ref,
+					head_ref: session.repo.head_ref,
+					file_paths: files,
+				});
+				recordClientTelemetry("client.acp.section_map.ranges.succeeded", {
+					"acp.session_id": session.session_id,
+					"section.id": section.section_id,
+					"section.local_changed_range_count": ranges.length,
+				});
+				return { ...section, ranges };
+			} catch (e) {
+				recordClientTelemetryError("client.acp.section_map.ranges.failed", e, {
+					"acp.session_id": session.session_id,
+					"section.id": section.section_id,
+				});
+				return section;
+			}
+		}),
+	);
 }
 
 export default function App() {
@@ -173,6 +105,7 @@ export default function App() {
 	const dismissErrors = useApp((s) => s.dismissErrors);
 	const setSectionMap = useApp((s) => s.setSectionMap);
 	const upsertSection = useApp((s) => s.upsertSection);
+	const upsertSectionProgress = useApp((s) => s.upsertSectionProgress);
 	const setCurrentSection = useApp((s) => s.setCurrentSection);
 	const startSectionProcessing = useApp((s) => s.startSectionProcessing);
 	const finishSectionProcessing = useApp((s) => s.finishSectionProcessing);
@@ -220,13 +153,20 @@ export default function App() {
 			});
 			setSectionMap(p.map.sections);
 			addSectionMapItem(p.map.sections);
-			const first = p.map.sections[0];
 			const sess = useApp.getState().session;
+			const sectionsWithRanges = sess
+				? await enrichSectionMapWithLocalRanges(sess, p.map.sections)
+				: p.map.sections;
+			if (cancelled) return;
+			if (sectionsWithRanges !== p.map.sections) {
+				setSectionMap(sectionsWithRanges);
+			}
+			const first = sectionsWithRanges[0];
 			recordClientTelemetry("client.acp.section_map.auto_open_evaluated", {
 				"acp.session_id": p.session_id,
 				"session.current_id": sess?.session_id,
 				"section.first_id": first?.section_id,
-				"section.count": p.map.sections.length,
+				"section.count": sectionsWithRanges.length,
 				"auto_open.will_send": !!first && !!sess,
 			});
 			if (first && sess) {
@@ -243,7 +183,7 @@ export default function App() {
 					);
 					await acp.sendMessage(
 						sess.session_id,
-						`Walk me through the section "${first.title}" (\`${first.section_id}\`).\n\n${publishedCommentContext}\n\nEmit one acp-section block for it and stop.`,
+						`Walk me through the section "${first.title}" (\`${first.section_id}\`).\n\n${publishedCommentContext}\n\nEmit one feedback-only acp-section block for it and stop. Do not include files, ranges, unimportant_ranges, base_ref, or head_ref.`,
 						{
 							origin: "section_map_auto_open",
 							sectionId: first.section_id,
@@ -271,14 +211,36 @@ export default function App() {
 				"acp.session_id": p.session_id,
 				"section.id": p.section.section_id,
 				"section.file_count": p.section.files.length,
-				"section.range_count": p.section.ranges.length,
+				"section.unimportant_range_count":
+					p.section.unimportant_ranges?.length ?? 0,
 				"section.concern_count": p.section.concerns.length,
 			});
 			upsertSection(p.section);
 			addReviewSectionItem(p.section);
 		};
 
+		const handleSectionProgress = (p: SectionProgressEvent) => {
+			recordClientTelemetry("client.acp.section_progress.received", {
+				"acp.session_id": p.session_id,
+				"section.id": p.update.section_id,
+				"section.phase": p.update.phase,
+				"section.file_count": p.update.files?.length,
+				"section.unimportant_range_count":
+					p.update.unimportant_ranges?.length,
+				"section.concern_count": p.update.concerns?.length,
+			});
+			upsertSectionProgress(p.update);
+		};
+
 		const handleToolCall = async (p: ToolCallEvent) => {
+			const sectionProgress = parseToolSectionProgress(p.raw_input);
+			if (sectionProgress) {
+				handleSectionProgress({
+					session_id: p.session_id,
+					update: sectionProgress,
+				});
+				return;
+			}
 			const sectionMap = parseToolSectionMap(p.raw_input);
 			if (sectionMap) {
 				await handleSectionMap({ session_id: p.session_id, map: sectionMap });
@@ -301,6 +263,10 @@ export default function App() {
 			const pending = await Promise.all([
 				on<SectionMapEvent>("acp://section-map", handleSectionMap),
 				on<SectionEvent>("acp://section", handleReviewSection),
+				on<SectionProgressEvent>(
+					"acp://section-progress",
+					handleSectionProgress,
+				),
 				on<ToolCallEvent>("acp://tool-call", handleToolCall),
 				on<ToolCallUpdateEvent>("acp://tool-call-update", (p) => {
 					updateToolCallItem(p.tool_call_id, p.status);
@@ -388,6 +354,7 @@ export default function App() {
 	}, [
 			setSectionMap,
 			upsertSection,
+			upsertSectionProgress,
 			setCurrentSection,
 			startSectionProcessing,
 			finishSectionProcessing,

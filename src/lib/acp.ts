@@ -3,12 +3,17 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
 	CommentDraft,
 	CommentResult,
+	LineRange,
 	ReviewSection,
 	SectionMap,
+	SectionProgressUpdate,
 } from "./types/section";
 import {
+	type TelemetryContext,
 	recordClientTelemetry,
 	recordClientTelemetryError,
+	withClientTelemetrySpan,
+	withTelemetryContext,
 } from "./telemetry";
 import { sendMessageTelemetryAttrs } from "./commentPublish";
 
@@ -85,18 +90,6 @@ export interface PrTarget {
 	number: number;
 }
 
-export interface PendingReview {
-	review_id: number;
-	node_id: string;
-	body: string;
-	html_url?: string;
-}
-
-export interface PendingReviewComment {
-	comment_id: string;
-	url?: string;
-}
-
 export interface LocalRepoOrigin {
 	repo_url: string;
 	owner: string;
@@ -126,17 +119,26 @@ export type RecentProject =
 export interface SectionMapEvent {
 	session_id: string;
 	map: SectionMap;
+	telemetry_context?: TelemetryContext;
 }
 
 export interface SectionEvent {
 	session_id: string;
 	section: ReviewSection;
+	telemetry_context?: TelemetryContext;
+}
+
+export interface SectionProgressEvent {
+	session_id: string;
+	update: SectionProgressUpdate;
+	telemetry_context?: TelemetryContext;
 }
 
 export interface TextChunkEvent {
 	session_id: string;
 	message_id: string;
 	text: string;
+	telemetry_context?: TelemetryContext;
 }
 
 export interface ToolCallEvent {
@@ -146,6 +148,7 @@ export interface ToolCallEvent {
 	kind: string;
 	status: string;
 	raw_input: unknown;
+	telemetry_context?: TelemetryContext;
 }
 
 export interface ToolCallUpdateEvent {
@@ -153,32 +156,38 @@ export interface ToolCallUpdateEvent {
 	tool_call_id: string;
 	status: string;
 	raw_output: unknown;
+	telemetry_context?: TelemetryContext;
 }
 
 export interface TurnDoneEvent {
 	session_id: string;
 	stop_reason: string;
+	telemetry_context?: TelemetryContext;
 }
 
 export interface ErrorEvent {
 	session_id?: string;
 	error: string;
+	telemetry_context?: TelemetryContext;
 }
 
 export interface CommentDraftEvent {
 	session_id: string;
 	draft_id: string;
 	draft: CommentDraft;
+	telemetry_context?: TelemetryContext;
 }
 
 export interface CommentResultEvent {
 	session_id: string;
 	result: CommentResult;
+	telemetry_context?: TelemetryContext;
 }
 
 export interface AgentStderrEvent {
 	session_id: string;
 	line: string;
+	telemetry_context?: TelemetryContext;
 }
 
 export interface SendMessageOptions {
@@ -196,13 +205,44 @@ function payloadSessionId(payload: unknown): string | undefined {
 	return undefined;
 }
 
+function payloadTelemetryContext(payload: unknown): TelemetryContext | undefined {
+	if (payload && typeof payload === "object" && "telemetry_context" in payload) {
+		const telemetryContext = (payload as { telemetry_context?: unknown })
+			.telemetry_context;
+		if (telemetryContext && typeof telemetryContext === "object") {
+			return Object.fromEntries(
+				Object.entries(telemetryContext).filter(
+					(entry): entry is [string, string] => typeof entry[1] === "string",
+				),
+			);
+		}
+	}
+	return undefined;
+}
+
+function invokeWithTelemetry<T>(
+	command: string,
+	args: Record<string, unknown> = {},
+	attrs: Record<string, string | number | boolean | undefined | null> = {},
+) {
+	return withClientTelemetrySpan(
+		`client.tauri.invoke.${command}`,
+		{ ...attrs, "tauri.command": command },
+		(telemetryContext) =>
+			invoke<T>(command, {
+				...args,
+				telemetryContext,
+			}),
+	);
+}
+
 export const acp = {
 	listAgents: async () => {
 		recordClientTelemetry("client.acp.invoke.started", {
 			"tauri.command": "list_agents_cmd",
 		});
 		try {
-			const agents = await invoke<AgentInfo[]>("list_agents_cmd");
+			const agents = await invokeWithTelemetry<AgentInfo[]>("list_agents_cmd");
 			recordClientTelemetry("client.acp.invoke.succeeded", {
 				"tauri.command": "list_agents_cmd",
 				"agent.count": agents.length,
@@ -220,7 +260,7 @@ export const acp = {
 			"tauri.command": "agent_skill_cmd",
 		});
 		try {
-			const skill = await invoke<string>("agent_skill_cmd");
+			const skill = await invokeWithTelemetry<string>("agent_skill_cmd");
 			recordClientTelemetry("client.acp.invoke.succeeded", {
 				"tauri.command": "agent_skill_cmd",
 				"agent_skill.length": skill.length,
@@ -238,7 +278,7 @@ export const acp = {
 			"tauri.command": "check_gh_cli_cmd",
 		});
 		try {
-			const status = await invoke<GhCliStatus>("check_gh_cli_cmd");
+			const status = await invokeWithTelemetry<GhCliStatus>("check_gh_cli_cmd");
 			recordClientTelemetry("client.acp.invoke.succeeded", {
 				"tauri.command": "check_gh_cli_cmd",
 				"gh.installed": status.installed,
@@ -258,9 +298,14 @@ export const acp = {
 			"session.source.kind": req.source.kind,
 		});
 		try {
-			const response = await invoke<StartSessionResponse>("start_session_cmd", {
-				req,
-			});
+			const response = await invokeWithTelemetry<StartSessionResponse>(
+				"start_session_cmd",
+				{ req },
+				{
+					"agent.kind": req.agent_kind,
+					"session.source.kind": req.source.kind,
+				},
+			);
 			recordClientTelemetry("client.acp.start_session.succeeded", {
 				"agent.kind": req.agent_kind,
 				"session.source.kind": req.source.kind,
@@ -281,11 +326,15 @@ export const acp = {
 		}
 	},
 	parsePrUrl: (url: string) =>
-		invoke<[string, string, number] | null>("parse_pr_url_cmd", { url }),
+		invokeWithTelemetry<[string, string, number] | null>("parse_pr_url_cmd", {
+			url,
+		}),
 	listRecentProjects: () =>
-		invoke<RecentProject[]>("list_recent_projects_cmd"),
+		invokeWithTelemetry<RecentProject[]>("list_recent_projects_cmd"),
 	inspectLocalRepoOrigin: (path: string) =>
-		invoke<LocalRepoOrigin>("inspect_local_repo_origin_cmd", { path }),
+		invokeWithTelemetry<LocalRepoOrigin>("inspect_local_repo_origin_cmd", {
+			path,
+		}),
 	sendMessage: async (
 		session_id: string,
 		text: string,
@@ -296,14 +345,18 @@ export const acp = {
 			sendMessageTelemetryAttrs({ session_id, text, options }),
 		);
 		try {
-			await invoke<void>("send_message_cmd", {
-				sessionId: session_id,
-				text,
-				origin: options.origin,
-				reason: options.reason,
-				sectionId: options.sectionId,
-				suppressPreview: options.suppressPreview,
-			});
+			await invokeWithTelemetry<void>(
+				"send_message_cmd",
+				{
+					sessionId: session_id,
+					text,
+					origin: options.origin,
+					reason: options.reason,
+					sectionId: options.sectionId,
+					suppressPreview: options.suppressPreview,
+				},
+				sendMessageTelemetryAttrs({ session_id, text, options }),
+			);
 			recordClientTelemetry("client.acp.send_message.succeeded", {
 				"acp.session_id": session_id,
 				"message.origin": options.origin,
@@ -323,46 +376,30 @@ export const acp = {
 		}
 	},
 	endSession: (session_id: string) =>
-		invoke<void>("end_session_cmd", { sessionId: session_id }),
+		invokeWithTelemetry<void>("end_session_cmd", { sessionId: session_id }),
 	getFileAtRef: (args: {
 		repo_path: string;
 		file_path: string;
 		refspec: string;
-	}) => invoke<string | null>("get_file_at_ref_cmd", { args }),
+	}) => invokeWithTelemetry<string | null>("get_file_at_ref_cmd", { args }),
 	getDiff: (args: {
 		repo_path: string;
 		base_ref: string;
 		head_ref: string;
 		file_path?: string | null;
-	}) => invoke<DiffPatch[]>("get_diff_cmd", { args }),
-	createPendingReview: (args: {
-		target: PrTarget;
-		head_sha: string;
-		body: string;
-	}) => invoke<PendingReview>("create_pending_review_cmd", { args }),
-	addPendingReviewThread: (args: {
-		target: PrTarget;
-		review_node_id: string;
-		body: string;
-		file_path: string;
-		line: number;
-		side: GithubCommentSide;
-	}) => invoke<PendingReviewComment>("add_pending_review_thread_cmd", { args }),
-	updatePendingReviewBody: (args: {
-		target: PrTarget;
-		review_id: number;
-		body: string;
-	}) => invoke<PendingReview>("update_pending_review_body_cmd", { args }),
-	submitPendingReview: (args: {
-		target: PrTarget;
-		review_id: number;
-		body: string;
-	}) => invoke<PendingReview>("submit_pending_review_cmd", { args }),
+	}) => invokeWithTelemetry<DiffPatch[]>("get_diff_cmd", { args }),
+	getChangedRanges: (args: {
+		repo_path: string;
+		base_ref: string;
+		head_ref: string;
+		file_paths: string[];
+	}) => invokeWithTelemetry<LineRange[]>("get_changed_ranges_cmd", { args }),
 };
 
 export type EventName =
 	| "acp://section-map"
 	| "acp://section"
+	| "acp://section-progress"
 	| "acp://text-chunk"
 	| "acp://tool-call"
 	| "acp://tool-call-update"
@@ -377,11 +414,13 @@ export function on<T>(name: EventName, handler: (payload: T) => void) {
 		"acp.event_name": name,
 	});
 	return listen<T>(name, (e) => {
-		recordClientTelemetry("client.acp.event.dispatched", {
-			"acp.event_name": name,
-			"acp.session_id": payloadSessionId(e.payload),
+		withTelemetryContext(payloadTelemetryContext(e.payload), () => {
+			recordClientTelemetry("client.acp.event.dispatched", {
+				"acp.event_name": name,
+				"acp.session_id": payloadSessionId(e.payload),
+			});
+			handler(e.payload);
 		});
-		handler(e.payload);
 	});
 }
 

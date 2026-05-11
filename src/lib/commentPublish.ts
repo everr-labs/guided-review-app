@@ -1,10 +1,4 @@
-import type {
-	PendingReview,
-	PendingReviewComment,
-	PrTarget,
-	SessionSource,
-} from "./acp";
-import type { CommentDraft } from "./types/section";
+import type { PrTarget, SendMessageOptions, SessionSource } from "./acp";
 import type { CommentDraftState } from "./store";
 import { truncateTelemetryText } from "./telemetry";
 
@@ -18,42 +12,15 @@ export interface SendMessageTelemetryOptions {
 }
 
 type CommentDraftStatusPatch = {
-	status:
-		| "adding_to_review"
-		| "pending_review"
-		| "submitting"
-		| "error";
-	pending_review_id?: number;
-	pending_review_node_id?: string;
+	status: "approved" | "publishing" | "error";
 	error?: string;
 };
 
-type CreatePendingReview = (args: {
-	target: PrTarget;
-	head_sha: string;
-	body: string;
-}) => Promise<PendingReview>;
-
-type AddPendingReviewThread = (args: {
-	target: PrTarget;
-	review_node_id: string;
-	body: string;
-	file_path: string;
-	line: number;
-	side: "LEFT" | "RIGHT";
-}) => Promise<PendingReviewComment>;
-
-type UpdatePendingReviewBody = (args: {
-	target: PrTarget;
-	review_id: number;
-	body: string;
-}) => Promise<PendingReview>;
-
-type SubmitPendingReview = (args: {
-	target: PrTarget;
-	review_id: number;
-	body: string;
-}) => Promise<PendingReview>;
+type SendMessage = (
+	session_id: string,
+	text: string,
+	options?: SendMessageOptions,
+) => Promise<void>;
 
 function errorMessage(error: unknown, fallback: string): string {
 	const message = error instanceof Error ? error.message : String(error);
@@ -76,160 +43,97 @@ export function prTargetFromSessionSource(
 	};
 }
 
-export function formatPublishCommentError(error: unknown): string {
-	const raw = error instanceof Error ? error.message : String(error);
-	const message = raw.replace(/^Error:\s*/, "").trim();
-	const ghFailure = message.match(/^gh \[[\s\S]*?\] failed:\s*([\s\S]*)$/);
-	if (ghFailure) {
-		const stderr = ghFailure[1]?.trim();
-		return stderr
-			? `GitHub rejected the comment: ${stderr}`
-			: "GitHub rejected the comment.";
-	}
-
-	return message || "Could not post the comment.";
-}
-
-export function buildPendingReviewBody(
-	drafts: Pick<CommentDraftState, "draft" | "status" | "pending_review_id">[],
-	reviewId?: number,
-): string {
-	return drafts
-		.filter((state) => {
-			if (state.draft.kind !== "top_level") return false;
-			if (state.status !== "pending_review") return false;
-			return reviewId === undefined || state.pending_review_id === reviewId;
-		})
-		.map((state) => state.draft.body.trim())
-		.filter(Boolean)
-		.join("\n\n");
-}
-
-function pendingReviewBodyWithDraft(args: {
-	reviewId?: number;
-	comment_drafts: CommentDraftState[];
-	current: CommentDraftState;
-}): string {
-	return buildPendingReviewBody(
-		[...args.comment_drafts, args.current],
-		args.reviewId,
-	);
-}
-
-export async function requestAddDraftToPendingReview(args: {
-	draft_id: string;
+export function buildAgentPublishCommentPrompt(args: {
 	target: PrTarget;
-	draft: CommentDraft;
 	head_sha: string;
-	pending_review: PendingReview | null;
-	comment_drafts: CommentDraftState[];
-	updateCommentDraft: (id: string, patch: CommentDraftStatusPatch) => void;
-	setPendingReview: (review: PendingReview) => void;
-	createPendingReview: CreatePendingReview;
-	addPendingReviewThread: AddPendingReviewThread;
-	updatePendingReviewBody: UpdatePendingReviewBody;
-}): Promise<void> {
-	args.updateCommentDraft(args.draft_id, {
-		status: "adding_to_review",
-		error: undefined,
-	});
-
-	let review = args.pending_review;
-	const currentDraftState: CommentDraftState = {
-		id: args.draft_id,
-		draft: args.draft,
-		status: "pending_review",
-		pending_review_id: review?.review_id,
+	drafts: Pick<CommentDraftState, "id" | "draft" | "status">[];
+}): string {
+	const payload = {
+		target: {
+			owner: args.target.owner,
+			repo: args.target.repo,
+			number: args.target.number,
+			label: `${args.target.owner}/${args.target.repo}#${args.target.number}`,
+		},
+		head_sha: args.head_sha,
+		drafts: args.drafts.map((state) => ({
+			draft_id: state.id,
+			...state.draft,
+		})),
 	};
 
-	try {
-		const body =
-			args.draft.kind === "top_level"
-				? pendingReviewBodyWithDraft({
-						reviewId: review?.review_id,
-						comment_drafts: args.comment_drafts,
-						current: currentDraftState,
-					})
-				: buildPendingReviewBody(args.comment_drafts, review?.review_id);
-
-		if (!review) {
-			const created = await args.createPendingReview({
-				target: args.target,
-				head_sha: args.head_sha,
-				body,
-			});
-			review = { ...created, body: created.body || body };
-		} else if (args.draft.kind === "top_level" && body !== review.body) {
-			const updated = await args.updatePendingReviewBody({
-				target: args.target,
-				review_id: review.review_id,
-				body,
-			});
-			review = { ...updated, body: updated.body || body };
-		}
-		args.setPendingReview(review);
-
-		if (args.draft.kind === "inline") {
-			if (!args.draft.file_path || args.draft.line === undefined) {
-				throw new Error("Inline comment drafts need a file path and line.");
-			}
-			await args.addPendingReviewThread({
-				target: args.target,
-				review_node_id: review.node_id,
-				body: args.draft.body,
-				file_path: args.draft.file_path,
-				line: args.draft.line,
-				side: args.draft.side ?? "RIGHT",
-			});
-		}
-
-		args.updateCommentDraft(args.draft_id, {
-			status: "pending_review",
-			pending_review_id: review.review_id,
-			pending_review_node_id: review.node_id,
-			error: undefined,
-		});
-	} catch (error) {
-		args.updateCommentDraft(args.draft_id, {
-			status: "error",
-			error: errorMessage(error, "Could not add the draft to pending review."),
-		});
-		throw error;
-	}
+	return [
+		"Publish these comments using your own GitHub tools and authentication.",
+		"Publish the drafts as one PR review if your tools support that. If they do not, publish the comments individually.",
+		"Do not ask the host app to publish them. The host is only holding the approved drafts.",
+		"Use the target PR and head SHA below. For inline comments, keep the provided file path, line, and side.",
+		"After each draft is attempted, emit exactly one `acp-comment-result` fenced JSON block for that draft.",
+		"Use `status: \"published\"` and include `url` when GitHub returns one. Use `status: \"failed\"` and include `error` if GitHub rejects it.",
+		"",
+		"Approved comment drafts:",
+		"```json",
+		JSON.stringify(payload, null, 2),
+		"```",
+	].join("\n");
 }
 
-export async function requestSubmitPendingReview(args: {
+export function approvedCommentDrafts(
+	drafts: CommentDraftState[],
+): CommentDraftState[] {
+	return drafts.filter((draft) => draft.status === "approved");
+}
+
+export function approveCommentDraft(args: {
+	draft_id: string;
+	updateCommentDraft: (id: string, patch: CommentDraftStatusPatch) => void;
+}): void {
+	args.updateCommentDraft(args.draft_id, {
+		status: "approved",
+		error: undefined,
+	});
+}
+
+export async function requestAgentPublishApprovedDrafts(args: {
+	session_id: string;
 	target: PrTarget;
-	pending_review: PendingReview;
+	head_sha: string;
 	comment_drafts: CommentDraftState[];
 	updateCommentDraft: (id: string, patch: CommentDraftStatusPatch) => void;
-	markPendingReviewSubmitted: (reviewId: number) => void;
-	submitPendingReview: SubmitPendingReview;
+	sendMessage: SendMessage;
 }): Promise<void> {
-	const drafts = args.comment_drafts.filter(
-		(draft) =>
-			draft.status === "pending_review" &&
-			draft.pending_review_id === args.pending_review.review_id,
-	);
+	const drafts = approvedCommentDrafts(args.comment_drafts);
+	if (drafts.length === 0) return;
+
 	for (const draft of drafts) {
 		args.updateCommentDraft(draft.id, {
-			status: "submitting",
+			status: "publishing",
 			error: undefined,
 		});
 	}
 
 	try {
-		await args.submitPendingReview({
-			target: args.target,
-			review_id: args.pending_review.review_id,
-			body: args.pending_review.body,
-		});
-		args.markPendingReviewSubmitted(args.pending_review.review_id);
+		await args.sendMessage(
+			args.session_id,
+			buildAgentPublishCommentPrompt({
+				target: args.target,
+				head_sha: args.head_sha,
+				drafts,
+			}),
+			{
+				origin: "comment_publish",
+				reason: "publish_approved_drafts",
+				suppressPreview: true,
+			},
+		);
 	} catch (error) {
+		const message = errorMessage(
+			error,
+			"Could not ask the agent to publish the comments.",
+		);
 		for (const draft of drafts) {
 			args.updateCommentDraft(draft.id, {
-				status: "pending_review",
-				error: errorMessage(error, "Could not submit the pending review."),
+				status: "approved",
+				error: message,
 			});
 		}
 		throw error;

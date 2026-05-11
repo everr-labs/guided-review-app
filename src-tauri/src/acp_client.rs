@@ -1,14 +1,21 @@
 use crate::agent_runner::{prepare_agent_command, AgentKind};
 use crate::events::*;
 use crate::fenced::FencedBuffers;
+use crate::section::SectionProgressUpdate;
+use crate::telemetry;
+use agent_client_protocol::mcp_server::{McpConnectionTo, McpServer, McpTool};
 use agent_client_protocol::schema::{
-    ContentBlock, ContentChunk, InitializeRequest, NewSessionRequest, PromptRequest,
-    ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, TextContent,
-    ToolCall, ToolCallUpdate,
+    ContentBlock, ContentChunk, InitializeRequest, ProtocolVersion, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
+    SessionNotification, SessionUpdate, ToolCall, ToolCallUpdate,
 };
-use agent_client_protocol::{on_receive_notification, on_receive_request, ByteStreams, Client};
+use agent_client_protocol::util::MatchDispatch;
+use agent_client_protocol::{
+    on_receive_notification, on_receive_request, Agent, ByteStreams, Client, SessionMessage,
+};
 use anyhow::{anyhow, Context, Result};
+use schemars::JsonSchema;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -40,6 +47,61 @@ struct PromptRequestMsg {
     origin: Option<String>,
     reason: Option<String>,
     section_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct GuidedReviewUpdateSectionTool {
+    app: AppHandle,
+    session_id: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct GuidedReviewUpdateSectionResult {
+    accepted: bool,
+}
+
+impl McpTool<Agent> for GuidedReviewUpdateSectionTool {
+    type Input = SectionProgressUpdate;
+    type Output = GuidedReviewUpdateSectionResult;
+
+    fn name(&self) -> String {
+        "guided_review_update_section".to_string()
+    }
+
+    fn description(&self) -> String {
+        "Progressively updates the current guided review section with feedback only.".to_string()
+    }
+
+    fn title(&self) -> Option<String> {
+        Some("Update guided review section".to_string())
+    }
+
+    async fn call_tool(
+        &self,
+        input: SectionProgressUpdate,
+        _context: McpConnectionTo<Agent>,
+    ) -> std::result::Result<GuidedReviewUpdateSectionResult, agent_client_protocol::Error> {
+        let session_id = self
+            .session_id
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .unwrap_or_default();
+        let span = tracing::info_span!("acp.section_progress", session_id = %session_id);
+        let _enter = span.enter();
+        let accepted = self
+            .app
+            .emit(
+                EV_SECTION_PROGRESS,
+                SectionProgressEvent {
+                    session_id,
+                    update: input,
+                    telemetry_context: telemetry::current_context(),
+                },
+            )
+            .is_ok();
+        Ok(GuidedReviewUpdateSectionResult { accepted })
+    }
 }
 
 #[derive(Default)]
@@ -225,6 +287,7 @@ pub async fn start_session(
                         AgentStderrEvent {
                             session_id: String::new(),
                             line,
+                            telemetry_context: telemetry::current_context(),
                         },
                     );
                 }
@@ -273,13 +336,29 @@ pub async fn start_session(
                     "initialized",
                 );
 
-                let new_session = cx
-                    .send_request(NewSessionRequest::new(cwd))
+                let section_progress_session_id =
+                    Arc::new(std::sync::Mutex::new(None::<String>));
+                let section_progress_server = McpServer::<Agent, _>::builder("guided-review")
+                    .instructions(
+                        "Use guided_review_update_section only for review feedback. Do not send files or ranges; the section map and local Git own those.",
+                    )
+                    .tool(GuidedReviewUpdateSectionTool {
+                        app: app_for_loop.clone(),
+                        session_id: section_progress_session_id.clone(),
+                    })
+                    .build();
+                let mut active_session = cx
+                    .build_session(cwd)
+                    .with_mcp_server(section_progress_server)?
                     .block_task()
+                    .start_session()
                     .await
                     .inspect_err(|e| tracing::error!(error = %e, "newSession failed (likely auth — try `claude /login` for Claude Code, `codex login` for Codex)"))?;
-                let session_id: SessionId = new_session.session_id.clone();
+                let session_id: SessionId = active_session.session_id().clone();
                 let session_id_str = session_id.to_string();
+                if let Ok(mut guard) = section_progress_session_id.lock() {
+                    *guard = Some(session_id_str.clone());
+                }
                 let _ = session_id_tx.send(session_id_str.clone());
 
                 while let Some(msg) = prompt_rx.recv().await {
@@ -293,31 +372,71 @@ pub async fn start_session(
                         section_id = msg.section_id.as_deref().unwrap_or(""),
                     );
                     async {
-                        let req = PromptRequest::new(
-                            session_id.clone(),
-                            vec![ContentBlock::Text(TextContent::new(msg.text))],
-                        );
-                        match cx.send_request(req).block_task().await {
-                            Ok(resp) => {
-                                let stop = format!("{:?}", resp.stop_reason);
-                                let summary = stream_diagnostics().finish_turn(&session_id_str);
-                                tracing::info!(
-                                    stop_reason = %stop,
-                                    chunks = summary.chunks,
-                                    assembled_len = summary.assembled_len,
-                                    overlap_events = summary.overlap_events,
-                                    replacement_events = summary.replacement_events,
-                                    max_overlap_len = summary.max_overlap_len,
-                                    "turn complete",
-                                );
-                                let _ = app_for_loop.emit(
-                                    EV_TURN_DONE,
-                                    TurnDoneEvent {
-                                        session_id: session_id_str.clone(),
-                                        stop_reason: stop,
-                                    },
-                                );
-                            }
+                        match active_session.send_prompt(msg.text) {
+                            Ok(()) => loop {
+                                match active_session.read_update().await {
+                                    Ok(SessionMessage::SessionMessage(dispatch)) => {
+                                        if let Err(e) = MatchDispatch::new(dispatch)
+                                            .if_notification(
+                                                async |notification: SessionNotification| {
+                                                    handle_notification(
+                                                        &app_for_loop,
+                                                        notification,
+                                                    );
+                                                    Ok(())
+                                                },
+                                            )
+                                            .await
+                                            .otherwise_ignore()
+                                        {
+                                            tracing::warn!(error = %e, "session update ignored after dispatch error");
+                                        }
+                                    }
+                                    Ok(SessionMessage::StopReason(stop_reason)) => {
+                                        let stop = format!("{stop_reason:?}");
+                                        let summary =
+                                            stream_diagnostics().finish_turn(&session_id_str);
+                                        tracing::info!(
+                                            stop_reason = %stop,
+                                            chunks = summary.chunks,
+                                            assembled_len = summary.assembled_len,
+                                            overlap_events = summary.overlap_events,
+                                            replacement_events = summary.replacement_events,
+                                            max_overlap_len = summary.max_overlap_len,
+                                            "turn complete",
+                                        );
+                                        let _ = app_for_loop.emit(
+                                            EV_TURN_DONE,
+                                            TurnDoneEvent {
+                                                session_id: session_id_str.clone(),
+                                                stop_reason: stop,
+                                                telemetry_context: telemetry::current_context(),
+                                            },
+                                        );
+                                        break;
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        let summary =
+                                            stream_diagnostics().finish_turn(&session_id_str);
+                                        tracing::error!(error = %e, "reading session update failed");
+                                        tracing::warn!(
+                                            chunks = summary.chunks,
+                                            assembled_len = summary.assembled_len,
+                                            overlap_events = summary.overlap_events,
+                                            replacement_events = summary.replacement_events,
+                                            max_overlap_len = summary.max_overlap_len,
+                                            "turn ended before completion",
+                                        );
+                                        emit_error(
+                                            &app_for_loop,
+                                            Some(session_id_str.clone()),
+                                            format!("prompt failed: {e}"),
+                                        );
+                                        break;
+                                    }
+                                }
+                            },
                             Err(e) => {
                                 let summary = stream_diagnostics().finish_turn(&session_id_str);
                                 tracing::error!(error = %e, "prompt failed");
@@ -394,6 +513,13 @@ fn handle_notification(app: &AppHandle, notif: SessionNotification) {
         SessionUpdate::AgentMessageChunk(chunk) => {
             let text = content_chunk_text(&chunk);
             let diagnostic = stream_diagnostics().record_chunk(&session_id, &text);
+            let chunk_span = tracing::debug_span!(
+                "acp.agent_message_chunk",
+                session_id = %session_id,
+                chunk_index = diagnostic.chunk_index,
+                chunk_len = diagnostic.chunk_len,
+            );
+            let _enter = chunk_span.enter();
             if capture_assistant_text_enabled() {
                 tracing::debug!(
                     chunk_index = diagnostic.chunk_index,
@@ -443,6 +569,7 @@ fn handle_notification(app: &AppHandle, notif: SessionNotification) {
                     session_id,
                     message_id: format!("turn-{}", Uuid::new_v4()),
                     text,
+                    telemetry_context: telemetry::current_context(),
                 },
             );
         }
@@ -513,6 +640,12 @@ fn capture_assistant_text_enabled_for(override_value: Option<&str>, debug_build:
 }
 
 fn emit_tool_call(app: &AppHandle, session_id: &str, tc: &ToolCall) {
+    let span = tracing::info_span!(
+        "acp.tool_call",
+        session_id = %session_id,
+        tool_call_id = %tc.tool_call_id,
+    );
+    let _enter = span.enter();
     let _ = app.emit(
         EV_TOOL_CALL,
         ToolCallEvent {
@@ -522,11 +655,18 @@ fn emit_tool_call(app: &AppHandle, session_id: &str, tc: &ToolCall) {
             kind: format!("{:?}", tc.kind),
             status: format!("{:?}", tc.status),
             raw_input: tc.raw_input.clone(),
+            telemetry_context: telemetry::current_context(),
         },
     );
 }
 
 fn emit_tool_call_update(app: &AppHandle, session_id: &str, tcu: &ToolCallUpdate) {
+    let span = tracing::info_span!(
+        "acp.tool_call_update",
+        session_id = %session_id,
+        tool_call_id = %tcu.tool_call_id,
+    );
+    let _enter = span.enter();
     let _ = app.emit(
         EV_TOOL_CALL_UPDATE,
         ToolCallUpdateEvent {
@@ -538,12 +678,25 @@ fn emit_tool_call_update(app: &AppHandle, session_id: &str, tcu: &ToolCallUpdate
                 .map(|s| format!("{s:?}"))
                 .unwrap_or_default(),
             raw_output: tcu.fields.raw_output.clone(),
+            telemetry_context: telemetry::current_context(),
         },
     );
 }
 
 fn emit_error(app: &AppHandle, session_id: Option<String>, error: String) {
-    let _ = app.emit(EV_ERROR, ErrorEvent { session_id, error });
+    let span = tracing::warn_span!(
+        "acp.error_event",
+        session_id = session_id.as_deref().unwrap_or("")
+    );
+    let _enter = span.enter();
+    let _ = app.emit(
+        EV_ERROR,
+        ErrorEvent {
+            session_id,
+            error,
+            telemetry_context: telemetry::current_context(),
+        },
+    );
 }
 
 fn scrub_nested_agent_env(cmd: &mut Command) {

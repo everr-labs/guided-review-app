@@ -1,4 +1,5 @@
-use crate::gh::{self, GhApiJsonRequest};
+use crate::gh;
+use crate::section::{LineRange, RangeKind};
 use anyhow::{anyhow, Context, Result};
 use git2::{DiffOptions, Repository};
 use serde::de::DeserializeOwned;
@@ -62,22 +63,6 @@ pub struct PublishedPrComment {
     pub is_outdated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PendingReview {
-    pub review_id: u64,
-    pub node_id: String,
-    pub body: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub html_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PendingReviewComment {
-    pub comment_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct GhPullRequestMetadata {
     title: String,
@@ -114,14 +99,6 @@ struct GhPullRequestReviewSummary {
     html_url: String,
     submitted_at: Option<String>,
     state: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhPendingReview {
-    id: u64,
-    node_id: String,
-    body: Option<String>,
-    html_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -571,160 +548,6 @@ pub async fn fetch_pull_request_review_comments(
     Ok(comments)
 }
 
-pub fn create_pending_review_request(
-    owner: &str,
-    repo: &str,
-    number: u64,
-    head_sha: &str,
-    body: &str,
-) -> GhApiJsonRequest {
-    GhApiJsonRequest {
-        method: "POST".to_string(),
-        path: format!("/repos/{owner}/{repo}/pulls/{number}/reviews"),
-        body: serde_json::json!({
-            "commit_id": head_sha,
-            "body": body,
-        }),
-    }
-}
-
-pub fn update_pending_review_body_request(
-    owner: &str,
-    repo: &str,
-    number: u64,
-    review_id: u64,
-    body: &str,
-) -> GhApiJsonRequest {
-    GhApiJsonRequest {
-        method: "PATCH".to_string(),
-        path: format!("/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}"),
-        body: serde_json::json!({ "body": body }),
-    }
-}
-
-pub fn submit_pending_review_request(
-    owner: &str,
-    repo: &str,
-    number: u64,
-    review_id: u64,
-    body: &str,
-) -> GhApiJsonRequest {
-    GhApiJsonRequest {
-        method: "POST".to_string(),
-        path: format!("/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/events"),
-        body: serde_json::json!({
-            "event": "COMMENT",
-            "body": body,
-        }),
-    }
-}
-
-pub fn add_pending_review_thread_request(
-    review_node_id: &str,
-    body: &str,
-    file_path: &str,
-    line: u32,
-    side: &str,
-) -> GhApiJsonRequest {
-    GhApiJsonRequest {
-        method: "POST".to_string(),
-        path: "graphql".to_string(),
-        body: serde_json::json!({
-            "query": "mutation($input:AddPullRequestReviewThreadInput!){addPullRequestReviewThread(input:$input){comment{id url}}}",
-            "variables": {
-                "input": {
-                    "pullRequestReviewId": review_node_id,
-                    "body": body,
-                    "path": file_path,
-                    "line": line,
-                    "side": side,
-                }
-            }
-        }),
-    }
-}
-
-fn parse_pending_review_json(raw: &str) -> Result<PendingReview> {
-    let review: GhPendingReview = serde_json::from_str(raw)?;
-    Ok(PendingReview {
-        review_id: review.id,
-        node_id: review.node_id,
-        body: review.body.unwrap_or_default(),
-        html_url: review.html_url,
-    })
-}
-
-fn parse_pending_review_comment_json(raw: &str) -> Result<PendingReviewComment> {
-    let value: serde_json::Value = serde_json::from_str(raw)?;
-    let comment = &value["data"]["addPullRequestReviewThread"]["comment"];
-    let comment_id = comment["id"]
-        .as_str()
-        .ok_or_else(|| anyhow!("GitHub response did not include a review comment id"))?
-        .to_string();
-    let url = comment["url"].as_str().map(|url| url.to_string());
-    Ok(PendingReviewComment { comment_id, url })
-}
-
-pub async fn create_pending_review(
-    owner: &str,
-    repo: &str,
-    number: u64,
-    head_sha: &str,
-    body: &str,
-) -> Result<PendingReview> {
-    let raw = gh::api_json(create_pending_review_request(
-        owner, repo, number, head_sha, body,
-    ))
-    .await?;
-    parse_pending_review_json(&raw)
-}
-
-pub async fn update_pending_review_body(
-    owner: &str,
-    repo: &str,
-    number: u64,
-    review_id: u64,
-    body: &str,
-) -> Result<PendingReview> {
-    let raw = gh::api_json(update_pending_review_body_request(
-        owner, repo, number, review_id, body,
-    ))
-    .await?;
-    parse_pending_review_json(&raw)
-}
-
-pub async fn submit_pending_review(
-    owner: &str,
-    repo: &str,
-    number: u64,
-    review_id: u64,
-    body: &str,
-) -> Result<PendingReview> {
-    let raw = gh::api_json(submit_pending_review_request(
-        owner, repo, number, review_id, body,
-    ))
-    .await?;
-    parse_pending_review_json(&raw)
-}
-
-pub async fn add_pending_review_thread(
-    review_node_id: &str,
-    body: &str,
-    file_path: &str,
-    line: u32,
-    side: &str,
-) -> Result<PendingReviewComment> {
-    let raw = gh::api_json(add_pending_review_thread_request(
-        review_node_id,
-        body,
-        file_path,
-        line,
-        side,
-    ))
-    .await?;
-    parse_pending_review_comment_json(&raw)
-}
-
 async fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<()> {
     let mut cmd = Command::new("git");
     if let Some(cwd) = cwd {
@@ -833,9 +656,146 @@ pub fn get_diff(
     Ok(out.into_inner())
 }
 
+#[derive(Debug, Clone)]
+struct ChangedLineRun {
+    origin: char,
+    start_line: u32,
+    end_line: u32,
+}
+
+#[derive(Debug, Default)]
+struct ChangedHunkAccumulator {
+    file_path: String,
+    runs: Vec<ChangedLineRun>,
+    has_added: bool,
+    has_removed: bool,
+}
+
+impl ChangedHunkAccumulator {
+    fn set_file(&mut self, file_path: String) {
+        self.file_path = file_path;
+    }
+
+    fn push_line(&mut self, origin: char, line: u32) {
+        match origin {
+            '+' => self.has_added = true,
+            '-' => self.has_removed = true,
+            _ => return,
+        }
+
+        if let Some(last) = self.runs.last_mut() {
+            if last.origin == origin && last.end_line + 1 == line {
+                last.end_line = line;
+                return;
+            }
+        }
+
+        self.runs.push(ChangedLineRun {
+            origin,
+            start_line: line,
+            end_line: line,
+        });
+    }
+
+    fn flush_into(&mut self, out: &mut Vec<LineRange>) {
+        if self.runs.is_empty() {
+            return;
+        }
+        let mixed_hunk = self.has_added && self.has_removed;
+        for run in self.runs.drain(..) {
+            let kind = match (run.origin, mixed_hunk) {
+                ('+', true) => RangeKind::ChangedNew,
+                ('-', true) => RangeKind::ChangedOld,
+                ('+', false) => RangeKind::Added,
+                ('-', false) => RangeKind::Removed,
+                _ => continue,
+            };
+            out.push(LineRange {
+                file_path: self.file_path.clone(),
+                start_line: run.start_line,
+                end_line: run.end_line,
+                kind,
+            });
+        }
+        self.has_added = false;
+        self.has_removed = false;
+    }
+}
+
+fn diff_delta_path(delta: git2::DiffDelta<'_>) -> String {
+    delta
+        .new_file()
+        .path()
+        .or_else(|| delta.old_file().path())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+pub fn get_changed_ranges(
+    repo_path: &Path,
+    base_ref: &str,
+    head_ref: &str,
+    file_paths: &[String],
+) -> Result<Vec<LineRange>> {
+    if file_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let repo = Repository::open(repo_path)?;
+    let base_tree = repo.revparse_single(base_ref)?.peel_to_commit()?.tree()?;
+    let head_tree = repo.revparse_single(head_ref)?.peel_to_commit()?.tree()?;
+
+    let mut opts = DiffOptions::new();
+    for file_path in file_paths {
+        opts.pathspec(file_path);
+    }
+    let diff = repo.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut opts))?;
+
+    use std::cell::RefCell;
+    let out: RefCell<Vec<LineRange>> = RefCell::new(Vec::new());
+    let pending = RefCell::new(ChangedHunkAccumulator::default());
+
+    diff.foreach(
+        &mut |delta, _| {
+            pending.borrow_mut().flush_into(&mut out.borrow_mut());
+            pending.borrow_mut().set_file(diff_delta_path(delta));
+            true
+        },
+        None,
+        Some(&mut |delta, _| {
+            pending.borrow_mut().flush_into(&mut out.borrow_mut());
+            pending.borrow_mut().set_file(diff_delta_path(delta));
+            true
+        }),
+        Some(&mut |delta, _, line| {
+            if pending.borrow().file_path.is_empty() {
+                pending.borrow_mut().set_file(diff_delta_path(delta));
+            }
+            match line.origin() {
+                '+' => {
+                    if let Some(line_no) = line.new_lineno() {
+                        pending.borrow_mut().push_line('+', line_no);
+                    }
+                }
+                '-' => {
+                    if let Some(line_no) = line.old_lineno() {
+                        pending.borrow_mut().push_line('-', line_no);
+                    }
+                }
+                _ => {}
+            }
+            true
+        }),
+    )?;
+    pending.borrow_mut().flush_into(&mut out.borrow_mut());
+
+    Ok(out.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::section::RangeKind;
     use std::fs;
     use std::process::Command as StdCommand;
     use uuid::Uuid;
@@ -877,6 +837,104 @@ mod tests {
         fs::write(path.join(file_name), body).unwrap();
         run_git_sync(path, &["add", file_name]);
         run_git_sync(path, &["commit", "-m", message]);
+    }
+
+    fn init_changed_range_repo(name: &str) -> PathBuf {
+        let repo_path = temp_repo_path(name);
+        fs::create_dir_all(&repo_path).unwrap();
+        run_git_sync(&repo_path, &["init", "-b", "main"]);
+        run_git_sync(&repo_path, &["config", "user.name", "Guided Review Test"]);
+        run_git_sync(
+            &repo_path,
+            &["config", "user.email", "guided-review-test@example.com"],
+        );
+        fs::create_dir_all(repo_path.join("src")).unwrap();
+        repo_path
+    }
+
+    #[test]
+    fn changed_ranges_reports_added_file_lines() {
+        let repo_path = init_changed_range_repo("range-added");
+        write_and_commit(&repo_path, "README.md", "base\n", "base");
+        let base = git_output_sync(&repo_path, &["rev-parse", "HEAD"]);
+        write_and_commit(&repo_path, "src/new.ts", "one\ntwo\n", "add file");
+        let head = git_output_sync(&repo_path, &["rev-parse", "HEAD"]);
+
+        let ranges =
+            get_changed_ranges(&repo_path, &base, &head, &["src/new.ts".to_string()]).unwrap();
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].file_path, "src/new.ts");
+        assert_eq!(ranges[0].start_line, 1);
+        assert_eq!(ranges[0].end_line, 2);
+        assert_eq!(ranges[0].kind, RangeKind::Added);
+
+        fs::remove_dir_all(repo_path).unwrap();
+    }
+
+    #[test]
+    fn changed_ranges_reports_removed_file_lines() {
+        let repo_path = init_changed_range_repo("range-removed");
+        write_and_commit(&repo_path, "src/old.ts", "one\ntwo\n", "base");
+        let base = git_output_sync(&repo_path, &["rev-parse", "HEAD"]);
+        fs::remove_file(repo_path.join("src/old.ts")).unwrap();
+        run_git_sync(&repo_path, &["add", "src/old.ts"]);
+        run_git_sync(&repo_path, &["commit", "-m", "remove file"]);
+        let head = git_output_sync(&repo_path, &["rev-parse", "HEAD"]);
+
+        let ranges =
+            get_changed_ranges(&repo_path, &base, &head, &["src/old.ts".to_string()]).unwrap();
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].file_path, "src/old.ts");
+        assert_eq!(ranges[0].start_line, 1);
+        assert_eq!(ranges[0].end_line, 2);
+        assert_eq!(ranges[0].kind, RangeKind::Removed);
+
+        fs::remove_dir_all(repo_path).unwrap();
+    }
+
+    #[test]
+    fn changed_ranges_reports_modified_hunks_on_both_sides() {
+        let repo_path = init_changed_range_repo("range-modified");
+        write_and_commit(&repo_path, "src/edit.ts", "one\ntwo\nthree\n", "base");
+        let base = git_output_sync(&repo_path, &["rev-parse", "HEAD"]);
+        write_and_commit(&repo_path, "src/edit.ts", "one\nTWO\nthree\n", "edit line");
+        let head = git_output_sync(&repo_path, &["rev-parse", "HEAD"]);
+
+        let ranges =
+            get_changed_ranges(&repo_path, &base, &head, &["src/edit.ts".to_string()]).unwrap();
+
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].file_path, "src/edit.ts");
+        assert_eq!(ranges[0].start_line, 2);
+        assert_eq!(ranges[0].end_line, 2);
+        assert_eq!(ranges[0].kind, RangeKind::ChangedOld);
+        assert_eq!(ranges[1].file_path, "src/edit.ts");
+        assert_eq!(ranges[1].start_line, 2);
+        assert_eq!(ranges[1].end_line, 2);
+        assert_eq!(ranges[1].kind, RangeKind::ChangedNew);
+
+        fs::remove_dir_all(repo_path).unwrap();
+    }
+
+    #[test]
+    fn changed_ranges_filters_to_requested_files() {
+        let repo_path = init_changed_range_repo("range-filter");
+        write_and_commit(&repo_path, "src/a.ts", "a\n", "base a");
+        write_and_commit(&repo_path, "src/b.ts", "b\n", "base b");
+        let base = git_output_sync(&repo_path, &["rev-parse", "HEAD"]);
+        write_and_commit(&repo_path, "src/a.ts", "A\n", "edit a");
+        write_and_commit(&repo_path, "src/b.ts", "B\n", "edit b");
+        let head = git_output_sync(&repo_path, &["rev-parse", "HEAD"]);
+
+        let ranges =
+            get_changed_ranges(&repo_path, &base, &head, &["src/a.ts".to_string()]).unwrap();
+
+        assert!(ranges.iter().all(|range| range.file_path == "src/a.ts"));
+        assert_eq!(ranges.len(), 2);
+
+        fs::remove_dir_all(repo_path).unwrap();
     }
 
     #[test]
@@ -1025,38 +1083,6 @@ mod tests {
         assert_eq!(comments[0].body, "Top-level review feedback.");
         assert_eq!(comments[0].created_at, "2026-05-05T11:00:00Z");
         assert_eq!(comments[0].file_path, None);
-    }
-
-    #[test]
-    fn create_pending_review_request_omits_submit_event() {
-        let request = create_pending_review_request(
-            "garden-co",
-            "jazz",
-            787,
-            "57d6bce6ed8e3750f829ff9e9a48b76615df11d6",
-            "Summary note.",
-        );
-
-        assert_eq!(request.method, "POST");
-        assert_eq!(request.path, "/repos/garden-co/jazz/pulls/787/reviews");
-        assert_eq!(
-            request.body["commit_id"],
-            "57d6bce6ed8e3750f829ff9e9a48b76615df11d6"
-        );
-        assert_eq!(request.body["body"], "Summary note.");
-        assert!(request.body.get("event").is_none());
-    }
-
-    #[test]
-    fn submit_pending_review_request_uses_comment_event() {
-        let request = submit_pending_review_request("garden-co", "jazz", 787, 44, "Summary note.");
-
-        assert_eq!(
-            request.path,
-            "/repos/garden-co/jazz/pulls/787/reviews/44/events",
-        );
-        assert_eq!(request.body["event"], "COMMENT");
-        assert_eq!(request.body["body"], "Summary note.");
     }
 
     #[tokio::test]

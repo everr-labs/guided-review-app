@@ -33,14 +33,11 @@ pub fn run() {
             end_session_cmd,
             get_file_at_ref_cmd,
             get_diff_cmd,
+            get_changed_ranges_cmd,
             parse_pr_url_cmd,
             list_recent_projects_cmd,
             inspect_local_repo_origin_cmd,
             record_recent_project_cmd,
-            create_pending_review_cmd,
-            add_pending_review_thread_cmd,
-            update_pending_review_body_cmd,
-            submit_pending_review_cmd,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
