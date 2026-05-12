@@ -7,6 +7,10 @@ use crate::repo::{
     get_file_at_ref, inspect_origin, parse_pr_url, resolve_source, ClonedRepo, DiffPatch,
     GithubRepoInfo, PublishedPrComment, PullRequestMetadata, SessionSource,
 };
+use crate::review_persistence::{
+    target_from_source, ReviewPersistence, ReviewPersistenceTarget, SaveReviewState,
+    SavedReviewRecord,
+};
 use crate::section::LineRange;
 use crate::telemetry::{self, TelemetryContext};
 use serde::{Deserialize, Serialize};
@@ -29,6 +33,7 @@ pub struct StartSessionResponse {
     pub pull_request_error: Option<String>,
     pub published_comments: Vec<PublishedPrComment>,
     pub published_comments_error: Option<String>,
+    pub saved_review: Option<SavedReviewRecord>,
 }
 
 const AGENT_SKILL: &str = include_str!(".././agent-skill.md");
@@ -96,6 +101,7 @@ pub async fn start_session_cmd(
         let (pull_request, pull_request_error) = pull_request_metadata_for_source(&req.source).await;
         let (published_comments, published_comments_error) =
             published_comments_for_source(&req.source).await;
+        let saved_review = saved_review_for_source(&req.source, &cloned.head_sha).await;
 
         let session = start_session(app, req.agent_kind, cloned.path.clone())
             .await
@@ -154,10 +160,36 @@ pub async fn start_session_cmd(
             pull_request_error,
             published_comments,
             published_comments_error,
+            saved_review,
         })
     }
     .instrument(span)
     .await
+}
+
+async fn saved_review_for_source(
+    source: &SessionSource,
+    current_head_sha: &str,
+) -> Option<SavedReviewRecord> {
+    let target = target_from_source(source)?;
+    let store = match ReviewPersistence::open_default().await {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!(error = %e, "review persistence unavailable");
+            return None;
+        }
+    };
+    match store.load(&target).await {
+        Ok(Some(mut record)) => {
+            record.is_stale = record.is_stale_for(current_head_sha);
+            Some(record)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "saved review unavailable");
+            None
+        }
+    }
 }
 
 async fn published_comments_for_source(
@@ -272,6 +304,38 @@ pub async fn record_recent_project_cmd(
             .await
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+    .instrument(span)
+    .await
+}
+
+#[tauri::command]
+pub async fn save_review_state_cmd(
+    req: SaveReviewState,
+    telemetry_context: Option<TelemetryContext>,
+) -> Result<SavedReviewRecord, String> {
+    let span = command_span("save_review_state_cmd", telemetry_context.as_ref());
+    async move {
+        let store = ReviewPersistence::open_default()
+            .await
+            .map_err(|e| e.to_string())?;
+        store.save(req).await.map_err(|e| e.to_string())
+    }
+    .instrument(span)
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_saved_review_cmd(
+    target: ReviewPersistenceTarget,
+    telemetry_context: Option<TelemetryContext>,
+) -> Result<(), String> {
+    let span = command_span("delete_saved_review_cmd", telemetry_context.as_ref());
+    async move {
+        let store = ReviewPersistence::open_default()
+            .await
+            .map_err(|e| e.to_string())?;
+        store.delete(&target).await.map_err(|e| e.to_string())
     }
     .instrument(span)
     .await

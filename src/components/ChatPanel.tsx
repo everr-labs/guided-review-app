@@ -24,6 +24,10 @@ import {
 	formatDiffReferenceLabel,
 } from "@/lib/diffFocus";
 import {
+	buildUserMessageWithReviewContext,
+	createReviewSnapshot,
+} from "@/lib/reviewPersistence";
+import {
 	assistantPartsToMarkdown,
 	stripMarkdownForSummary,
 } from "@/lib/markdownContent";
@@ -210,7 +214,10 @@ export function ChatPanel() {
 	const drafts = useApp((s) => s.commentDrafts);
 	const streaming = useApp((s) => s.streaming);
 	const sections = useApp((s) => s.sections);
+	const currentSectionId = useApp((s) => s.currentSectionId);
 	const processingSectionId = useApp((s) => s.processingSectionId);
+	const publishedComments = useApp((s) => s.publishedComments);
+	const publishedCommentsError = useApp((s) => s.publishedCommentsError);
 	const addUserMessage = useApp((s) => s.addUserMessage);
 	const pushError = useApp((s) => s.pushError);
 	const pendingDiffReferences = useApp((s) => s.pendingDiffReferences);
@@ -248,6 +255,19 @@ export function ChatPanel() {
 			.map((r) => formatDiffReferenceForMessage(r))
 			.join("\n");
 		const body = refs ? (text ? `${refs}\n\n${text}` : refs) : text;
+		const snapshot = createReviewSnapshot({
+			current_section_id: currentSectionId,
+			sections,
+			chat,
+			comment_drafts: drafts,
+			published_comments: publishedComments,
+			published_comments_error: publishedCommentsError,
+		});
+		const messageToAgent = buildUserMessageWithReviewContext({
+			userText: body,
+			session,
+			snapshot,
+		});
 		recordClientTelemetry("client.chat.send.requested", {
 			"acp.session_id": session.session_id,
 			"message.length": body.length,
@@ -257,9 +277,10 @@ export function ChatPanel() {
 		addUserMessage(body);
 		clearPendingDiffReferences();
 		try {
-			await acp.sendMessage(session.session_id, body, {
+			await acp.sendMessage(session.session_id, messageToAgent, {
 				origin: "chat_panel_user_send",
 				reason: "user_reply",
+				suppressPreview: true,
 			});
 			recordClientTelemetry("client.chat.send.succeeded", {
 				"acp.session_id": session.session_id,

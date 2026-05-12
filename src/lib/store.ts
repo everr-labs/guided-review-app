@@ -21,6 +21,7 @@ import type { LocalProject } from "./projectSource";
 import { clearLastProjectPath, saveLastProjectPath } from "./projectSource";
 import type { DiffFocusRange } from "./diffFocus";
 import { recordClientTelemetry, truncateTelemetryText } from "./telemetry";
+import type { ReviewSnapshot } from "./reviewPersistence";
 
 export interface SessionInfo {
 	session_id: string;
@@ -223,6 +224,7 @@ interface AppState {
 
 	setProject: (p: LocalProject | null) => void;
 	setSession: (s: SessionInfo | null) => void;
+	restoreSavedReview: (session: SessionInfo, snapshot: ReviewSnapshot) => void;
 	reset: () => void;
 	setSectionMap: (entries: SectionMapEntry[]) => void;
 	upsertSection: (section: ReviewSection) => void;
@@ -526,6 +528,35 @@ export const useApp = create<AppState>((set) => ({
 			publishedComments: s?.published_comments ?? [],
 			publishedCommentsFetchedAt: s ? Date.now() : null,
 			publishedCommentsError: s?.published_comments_error ?? null,
+			pendingDiffReferences: [],
+		});
+	},
+	restoreSavedReview: (session, snapshot) => {
+		recordClientTelemetry("client.store.saved_review.restored", {
+			"acp.session_id": session.session_id,
+			"repo.display_slug": session.repo.display_slug,
+			"repo.base_ref": session.repo.base_ref,
+			"repo.head_ref": session.repo.head_ref,
+			"session.source.kind": session.source.kind,
+			"section.current_id": snapshot.current_section_id,
+			"section.count": snapshot.sections.length,
+			"chat.count": snapshot.chat.length,
+			"comment_draft.count": snapshot.comment_drafts.length,
+		});
+		set({
+			session,
+			sections: snapshot.sections,
+			currentSectionId: snapshot.current_section_id,
+			processingSectionId: null,
+			chat: snapshot.chat,
+			commentDrafts: snapshot.comment_drafts,
+			publishedComments: snapshot.published_comments,
+			publishedCommentsFetchedAt: Date.now(),
+			publishedCommentsError: snapshot.published_comments_error,
+			streaming: false,
+			structuredReviewBlockOpen: false,
+			diffFocus: null,
+			diffFocusError: null,
 			pendingDiffReferences: [],
 		});
 	},

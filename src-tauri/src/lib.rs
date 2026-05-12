@@ -6,6 +6,7 @@ mod fenced;
 mod gh;
 mod projects;
 mod repo;
+mod review_persistence;
 mod section;
 mod telemetry;
 
@@ -38,6 +39,8 @@ pub fn run() {
             list_recent_projects_cmd,
             inspect_local_repo_origin_cmd,
             record_recent_project_cmd,
+            save_review_state_cmd,
+            delete_saved_review_cmd,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

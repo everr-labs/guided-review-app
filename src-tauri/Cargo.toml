@@ -44,3 +44,4 @@ tracing-opentelemetry = "0.32"
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }
+libsql = { version = "0.9.30", default-features = false, features = ["core"] }

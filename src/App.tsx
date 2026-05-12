@@ -41,6 +41,10 @@ import {
 	truncateTelemetryText,
 } from "@/lib/telemetry";
 import { formatPublishedCommentsForPrompt } from "@/lib/publishedComments";
+import {
+	createReviewSnapshot,
+	saveReviewRequestFromSession,
+} from "@/lib/reviewPersistence";
 import { ghCliNeedsInstallPopup, ghCliPopupMessage } from "@/lib/ghCli";
 import {
 	Dialog,
@@ -101,6 +105,12 @@ async function enrichSectionMapWithLocalRanges(
 
 export default function App() {
 	const session = useApp((s) => s.session);
+	const sections = useApp((s) => s.sections);
+	const currentSectionId = useApp((s) => s.currentSectionId);
+	const chat = useApp((s) => s.chat);
+	const commentDrafts = useApp((s) => s.commentDrafts);
+	const publishedComments = useApp((s) => s.publishedComments);
+	const publishedCommentsError = useApp((s) => s.publishedCommentsError);
 	const errors = useApp((s) => s.errors);
 	const dismissErrors = useApp((s) => s.dismissErrors);
 	const setSectionMap = useApp((s) => s.setSectionMap);
@@ -138,6 +148,37 @@ export default function App() {
 			cancelled = true;
 		};
 	}, [pushError]);
+
+	useEffect(() => {
+		if (!session) return;
+		const snapshot = createReviewSnapshot({
+			current_section_id: currentSectionId,
+			sections,
+			chat,
+			comment_drafts: commentDrafts,
+			published_comments: publishedComments,
+			published_comments_error: publishedCommentsError,
+		});
+		const req = saveReviewRequestFromSession({ session, snapshot });
+		if (!req) return;
+		const handle = window.setTimeout(() => {
+			void acp.saveReviewState(req).catch((e) => {
+				recordClientTelemetryError("client.review_persistence.save.failed", e, {
+					"acp.session_id": session.session_id,
+					"session.source.kind": session.source.kind,
+				});
+			});
+		}, 500);
+		return () => window.clearTimeout(handle);
+	}, [
+		session,
+		sections,
+		currentSectionId,
+		chat,
+		commentDrafts,
+		publishedComments,
+		publishedCommentsError,
+	]);
 
 	useEffect(() => {
 		recordClientTelemetry("client.app.event_listeners.effect_started", {

@@ -4,7 +4,13 @@ import { Loader2, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useApp } from "@/lib/store";
-import { acp, type AgentInfo, type AgentKind, type SessionSource } from "@/lib/acp";
+import {
+	acp,
+	type AgentInfo,
+	type AgentKind,
+	type SessionSource,
+	type StartSessionResponse,
+} from "@/lib/acp";
 import {
 	loadSelectedAgentKind,
 	saveSelectedAgentKind,
@@ -15,6 +21,18 @@ import {
 	recordClientTelemetryError,
 } from "@/lib/telemetry";
 import { formatPublishedCommentsForPrompt } from "@/lib/publishedComments";
+import {
+	buildAgentRestoreReviewPrompt,
+	reviewTargetFromSource,
+	sessionInfoFromSavedReview,
+} from "@/lib/reviewPersistence";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
 
 const DEFAULT_AGENT_KIND: AgentKind = "claude_code";
 
@@ -22,6 +40,7 @@ export function ReviewLauncher() {
 	const project = useApp((s) => s.project);
 	const session = useApp((s) => s.session);
 	const setSession = useApp((s) => s.setSession);
+	const restoreSavedReview = useApp((s) => s.restoreSavedReview);
 	const reset = useApp((s) => s.reset);
 	const addUserMessage = useApp((s) => s.addUserMessage);
 	const pushError = useApp((s) => s.pushError);
@@ -33,6 +52,8 @@ export function ReviewLauncher() {
 	);
 	const [starting, setStarting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
+	const [pendingSavedStart, setPendingSavedStart] =
+		useState<StartSessionResponse | null>(null);
 
 	useEffect(() => {
 		(async () => {
@@ -65,7 +86,73 @@ export function ReviewLauncher() {
 				? sourceResult.error
 				: null;
 	const canStart =
-		!starting && !!project && "source" in sourceResult;
+		!starting && !pendingSavedStart && !!project && "source" in sourceResult;
+
+	async function sendFreshKickoff(res: StartSessionResponse) {
+		const skill = await acp.agentSkill();
+		const publishedCommentContext = formatPublishedCommentsForPrompt(
+			res.published_comments,
+			res.published_comments_error,
+		);
+		const kickoff = `${skill}\n\n---\n\nThe repository for this review is at \`${res.repo.path}\` (base \`${res.repo.base_ref}\`, head \`${res.repo.head_ref}\`).\n\n${publishedCommentContext}\n\nInvestigate the diff with your built-in tools, then reply with one \`\`\`acp-section-map\`\`\` fenced block describing the planned sections. After that, stop and wait for me.`;
+		addUserMessage("(starting guided review)");
+		await acp.sendMessage(res.session_id, kickoff, {
+			origin: "review_launcher_kickoff",
+			reason: "request_section_map",
+			suppressPreview: true,
+		});
+		recordClientTelemetry("client.launcher.start.kickoff_sent", {
+			"acp.session_id": res.session_id,
+		});
+	}
+
+	async function startFreshReview(res: StartSessionResponse, clearSaved: boolean) {
+		if (clearSaved) {
+			const target = reviewTargetFromSource(res.source);
+			if (target) await acp.deleteSavedReview(target);
+		}
+		reset();
+		setSession(res);
+		setInput("");
+		await sendFreshKickoff(res);
+	}
+
+	async function resumeSavedReview(res: StartSessionResponse) {
+		const savedReview = res.saved_review;
+		if (!savedReview) {
+			await startFreshReview(res, false);
+			return;
+		}
+		const restoredSession = sessionInfoFromSavedReview({
+			session_id: res.session_id,
+			repo: res.repo,
+			source: res.source,
+			pull_request: res.pull_request,
+			pull_request_error: res.pull_request_error,
+			savedReview,
+		});
+		reset();
+		restoreSavedReview(restoredSession, savedReview.snapshot);
+		setInput("");
+		await acp.sendMessage(
+			res.session_id,
+			buildAgentRestoreReviewPrompt({
+				session: restoredSession,
+				savedReview,
+			}),
+			{
+				origin: "review_restore_context",
+				reason: "restore_saved_review_context",
+				suppressPreview: true,
+			},
+		);
+		recordClientTelemetry("client.launcher.saved_review.restored", {
+			"acp.session_id": res.session_id,
+			"review.is_stale": savedReview.is_stale,
+			"review.saved_head_sha": savedReview.head_sha,
+			"repo.head_sha": res.repo.head_sha,
+		});
+	}
 
 	async function start(source: SessionSource) {
 		setError(null);
@@ -82,29 +169,48 @@ export function ReviewLauncher() {
 				"acp.session_id": res.session_id,
 				"repo.display_slug": res.repo.display_slug,
 			});
-			reset();
-			setSession(res);
-			setInput("");
-			const skill = await acp.agentSkill();
-			const publishedCommentContext = formatPublishedCommentsForPrompt(
-				res.published_comments,
-				res.published_comments_error,
-			);
-			const kickoff = `${skill}\n\n---\n\nThe repository for this review is at \`${res.repo.path}\` (base \`${res.repo.base_ref}\`, head \`${res.repo.head_ref}\`).\n\n${publishedCommentContext}\n\nInvestigate the diff with your built-in tools, then reply with one \`\`\`acp-section-map\`\`\` fenced block describing the planned sections. After that, stop and wait for me.`;
-			addUserMessage("(starting guided review)");
-			await acp.sendMessage(res.session_id, kickoff, {
-				origin: "review_launcher_kickoff",
-				reason: "request_section_map",
-				suppressPreview: true,
-			});
-			recordClientTelemetry("client.launcher.start.kickoff_sent", {
-				"acp.session_id": res.session_id,
-			});
+			if (res.saved_review) {
+				setPendingSavedStart(res);
+				return;
+			}
+			await startFreshReview(res, false);
 		} catch (e) {
 			recordClientTelemetryError("client.launcher.start.failed", e, {
 				"agent.kind": agentKind,
 				"session.source.kind": source.kind,
 			});
+			const message = String(e);
+			setError(message);
+			pushError(message);
+		} finally {
+			setStarting(false);
+		}
+	}
+
+	async function chooseResumeSaved() {
+		if (!pendingSavedStart) return;
+		setStarting(true);
+		try {
+			const res = pendingSavedStart;
+			setPendingSavedStart(null);
+			await resumeSavedReview(res);
+		} catch (e) {
+			const message = String(e);
+			setError(message);
+			pushError(message);
+		} finally {
+			setStarting(false);
+		}
+	}
+
+	async function chooseStartOver() {
+		if (!pendingSavedStart) return;
+		setStarting(true);
+		try {
+			const res = pendingSavedStart;
+			setPendingSavedStart(null);
+			await startFreshReview(res, true);
+		} catch (e) {
 			const message = String(e);
 			setError(message);
 			pushError(message);
@@ -127,6 +233,35 @@ export function ReviewLauncher() {
 
 	return (
 		<div className="flex min-w-0 flex-1 items-center gap-2">
+			<Dialog open={!!pendingSavedStart}>
+				<DialogContent>
+					<DialogHeader>
+						<DialogTitle>Saved review found</DialogTitle>
+						<DialogDescription>
+							{pendingSavedStart?.saved_review?.is_stale
+								? "This PR has saved review state, but the PR head changed. Resume the saved review or start over with the latest code."
+								: "This PR has saved review state. Resume it or start over with a fresh analysis."}
+						</DialogDescription>
+					</DialogHeader>
+					<div className="flex justify-end gap-2">
+						<Button
+							type="button"
+							variant="outline"
+							onClick={chooseStartOver}
+							disabled={starting}
+						>
+							Start over
+						</Button>
+						<Button
+							type="button"
+							onClick={chooseResumeSaved}
+							disabled={starting}
+						>
+							Resume saved review
+						</Button>
+					</div>
+				</DialogContent>
+			</Dialog>
 			<form onSubmit={onSubmit} className="flex min-w-0 flex-1 items-center gap-2">
 				<Input
 					value={input}
