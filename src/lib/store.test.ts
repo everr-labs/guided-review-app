@@ -95,7 +95,7 @@ async function resetReviewState() {
 		session: null,
 		sections: [],
 		currentSectionId: null,
-		processingSectionId: null,
+		processingSectionIds: [],
 		chat: [],
 		commentDrafts: [],
 		publishedComments: [],
@@ -250,7 +250,32 @@ test("auto-opening the first review section keeps PR description selected", asyn
 	useApp.getState().startSectionProcessing("overview");
 
 	assert.equal(useApp.getState().currentSectionId, "pr-description");
-	assert.equal(useApp.getState().processingSectionId, "overview");
+	assert.deepEqual(useApp.getState().processingSectionIds, ["overview"]);
+});
+
+test("startSectionProcessing preserves a non-PR-description selection", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "overview",
+			title: "Overview",
+			intent: "Understand the change",
+		},
+		{
+			section_id: "tests",
+			title: "Tests",
+			intent: "Check coverage",
+		},
+	]);
+	useApp.getState().setCurrentSection("tests", "user_click");
+
+	useApp.getState().startSectionProcessing("overview");
+
+	assert.equal(useApp.getState().currentSectionId, "tests");
+	assert.deepEqual(useApp.getState().processingSectionIds, ["overview"]);
 });
 
 test("upsertSection keeps PR description selected while first real section loads", async () => {
@@ -275,17 +300,53 @@ test("upsertSection keeps PR description selected while first real section loads
 		ranges: [],
 		unimportant_ranges: [],
 		concerns: [],
-		uncovered_scenarios: [],
-		test_coverage_notes: "",
 		base_ref: "base",
 		head_ref: "head",
 		pause_prompt: "",
 	});
 
 	assert.equal(useApp.getState().currentSectionId, "pr-description");
-	assert.equal(useApp.getState().processingSectionId, null);
+	assert.deepEqual(useApp.getState().processingSectionIds, []);
 	assert.equal(useApp.getState().sections[1]?.kind, "review_section");
 	assert.equal(useApp.getState().sections[1]?.status, "in_review");
+});
+
+test("upsertSection preserves a non-PR-description selection when feedback arrives for another section", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "overview",
+			title: "Overview",
+			intent: "Understand the change",
+		},
+		{
+			section_id: "tests",
+			title: "Tests",
+			intent: "Check coverage",
+		},
+	]);
+	useApp.getState().setCurrentSection("tests", "user_click");
+	useApp.getState().startSectionProcessing("overview");
+
+	useApp.getState().upsertSection({
+		schema_version: 1,
+		section_id: "overview",
+		title: "Overview",
+		intent: "Understand the change",
+		files: [],
+		ranges: [],
+		unimportant_ranges: [],
+		concerns: [],
+		base_ref: "base",
+		head_ref: "head",
+		pause_prompt: "",
+	});
+
+	assert.equal(useApp.getState().currentSectionId, "tests");
+	assert.deepEqual(useApp.getState().processingSectionIds, []);
 });
 
 test("feedback-only section merges into map preview without replacing structure", async () => {
@@ -324,8 +385,6 @@ test("feedback-only section merges into map preview without replacing structure"
 				line: 148,
 			},
 		],
-		uncovered_scenarios: [],
-		test_coverage_notes: "Missing empty input coverage.",
 		pause_prompt: "Want to leave a comment?",
 	});
 	assert(feedback);
@@ -335,7 +394,7 @@ test("feedback-only section merges into map preview without replacing structure"
 	const section = useApp.getState().sections[1];
 	assert.equal(section?.kind, "review_section");
 	assert.equal(section?.status, "in_review");
-	assert.equal(useApp.getState().processingSectionId, null);
+	assert.deepEqual(useApp.getState().processingSectionIds, []);
 	assert.deepEqual(
 		section?.kind === "review_section" ? section.section?.files : [],
 		["src/lib/store.ts"],
@@ -401,8 +460,6 @@ test("legacy full section cannot overwrite map-owned files and ranges", async ()
 		],
 		unimportant_ranges: [],
 		concerns: [],
-		uncovered_scenarios: [],
-		test_coverage_notes: "Legacy feedback.",
 		base_ref: "wrong-base",
 		head_ref: "wrong-head",
 		pause_prompt: "",
@@ -474,13 +531,12 @@ test("upsertSectionProgress merges progressive range and feedback updates", asyn
 				line: 148,
 			},
 		],
-		test_coverage_notes: "Happy path is covered; empty input is not.",
 	});
 
 	const section = useApp.getState().sections[1];
 	assert.equal(section?.kind, "review_section");
 	assert.equal(section?.status, "in_review");
-	assert.equal(useApp.getState().processingSectionId, "validation-flow");
+	assert.deepEqual(useApp.getState().processingSectionIds, ["validation-flow"]);
 	assert.deepEqual(
 		section?.kind === "review_section" ? section.section?.files : [],
 		["src/lib/store.ts"],
@@ -511,6 +567,170 @@ test("upsertSectionProgress merges progressive range and feedback updates", asyn
 		repo.head_ref,
 	);
 	assert.equal(useApp.getState().currentSectionId, "pr-description");
+});
+
+test("upsertSectionProgress preserves a non-PR-description selection", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "validation-flow",
+			title: "Validation flow",
+			intent: "Checks before saving",
+		},
+		{
+			section_id: "tests",
+			title: "Tests",
+			intent: "Check coverage",
+		},
+	]);
+	useApp.getState().setCurrentSection("tests", "user_click");
+
+	useApp.getState().upsertSectionProgress({
+		section_id: "validation-flow",
+		phase: "ranges",
+		files: ["src/lib/store.ts"],
+		ranges: [
+			{
+				file_path: "src/lib/store.ts",
+				start_line: 120,
+				end_line: 180,
+				kind: "changed-new",
+			},
+		],
+	});
+
+	assert.equal(useApp.getState().currentSectionId, "tests");
+	assert.deepEqual(useApp.getState().processingSectionIds, ["validation-flow"]);
+});
+
+test("App-style flow surfaces a chat card for a feedback-only section using the merged title and files", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	const { parseReviewSectionPayload } = await import(
+		new URL("./reviewSectionPayload.ts", import.meta.url).href
+	);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "validation-flow",
+			title: "Validation flow",
+			intent: "Checks before saving",
+			files: ["src/lib/store.ts"],
+			ranges: [
+				{
+					file_path: "src/lib/store.ts",
+					start_line: 120,
+					end_line: 180,
+					kind: "changed-new",
+				},
+			],
+		},
+	]);
+
+	const feedback = parseReviewSectionPayload({
+		section_id: "validation-flow",
+		concerns: [
+			{
+				text: "Empty input can still be submitted.",
+				severity: "medium",
+				file_path: "src/lib/store.ts",
+				line: 148,
+			},
+		],
+		pause_prompt: "Want to leave a comment?",
+	});
+	assert(feedback);
+
+	// Mirrors App.tsx handleReviewSection: upsert the data, then append a chat
+	// card built from the merged stored section so map-owned title/files survive
+	// a feedback-only payload.
+	useApp.getState().upsertSection(feedback);
+	const merged = useApp
+		.getState()
+		.sections.find((s: SectionState) => s.id === "validation-flow");
+	assert.equal(merged?.kind, "review_section");
+	if (merged?.kind === "review_section" && merged.section) {
+		useApp.getState().addReviewSectionItem(merged.section);
+	}
+
+	const chat = useApp.getState().chat;
+	const last = chat[chat.length - 1];
+	assert.equal(last?.item?.type, "review_section");
+	assert.equal(
+		last?.item?.type === "review_section" ? last.item.section.title : "",
+		"Validation flow",
+	);
+	assert.deepEqual(
+		last?.item?.type === "review_section" ? last.item.section.files : [],
+		["src/lib/store.ts"],
+	);
+	assert.deepEqual(
+		last?.item?.type === "review_section" ? last.item.section.ranges : [],
+		[
+			{
+				file_path: "src/lib/store.ts",
+				start_line: 120,
+				end_line: 180,
+				kind: "changed-new",
+			},
+		],
+	);
+	assert.equal(
+		last?.item?.type === "review_section"
+			? last.item.section.concerns[0]?.text
+			: "",
+		"Empty input can still be submitted.",
+	);
+});
+
+test("App-style flow appends a fresh chat card every time feedback arrives for the same section", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+	await resetReviewState();
+
+	useApp.getState().setSession(prSession);
+	useApp.getState().setSectionMap([
+		{
+			section_id: "overview",
+			title: "Overview",
+			intent: "Understand the change",
+		},
+	]);
+
+	function deliverFeedback(text: string) {
+		useApp.getState().upsertSection({
+			schema_version: 1,
+			section_id: "overview",
+			title: "Overview",
+			intent: "Understand the change",
+			files: [],
+			ranges: [],
+			unimportant_ranges: [],
+			concerns: [
+				{ text, severity: "medium" },
+			],
+			base_ref: "base",
+			head_ref: "head",
+			pause_prompt: "",
+		});
+		const merged = useApp
+			.getState()
+			.sections.find((s: SectionState) => s.id === "overview");
+		if (merged?.kind === "review_section" && merged.section) {
+			useApp.getState().addReviewSectionItem(merged.section);
+		}
+	}
+
+	deliverFeedback("first finding");
+	deliverFeedback("second finding");
+
+	const cards = useApp
+		.getState()
+		.chat.filter((m: ChatMessage) => m.item?.type === "review_section");
+	assert.equal(cards.length, 2);
 });
 
 test("setProject saves and clears the last selected project path", async () => {
@@ -585,12 +805,14 @@ test("section processing state clears when the requested section arrives", async
 			},
 		],
 		currentSectionId: null,
-		processingSectionId: null,
+		processingSectionIds: [],
 	});
 
 	useApp.getState().startSectionProcessing("metadata-retention-logic");
 
-	assert.equal(useApp.getState().processingSectionId, "metadata-retention-logic");
+	assert.deepEqual(useApp.getState().processingSectionIds, [
+		"metadata-retention-logic",
+	]);
 
 	useApp.getState().upsertSection({
 		schema_version: 1,
@@ -601,14 +823,35 @@ test("section processing state clears when the requested section arrives", async
 		ranges: [],
 		unimportant_ranges: [],
 		concerns: [],
-		uncovered_scenarios: [],
-		test_coverage_notes: "",
 		base_ref: "base",
 		head_ref: "head",
 		pause_prompt: "",
 	});
 
-	assert.equal(useApp.getState().processingSectionId, null);
+	assert.deepEqual(useApp.getState().processingSectionIds, []);
+});
+
+test("section processing tracks multiple background section tasks independently", async () => {
+	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
+
+	useApp.setState({
+		sections: [],
+		currentSectionId: null,
+		processingSectionIds: [],
+	});
+
+	useApp.getState().startSectionProcessing("metadata-retention-logic");
+	useApp.getState().startSectionProcessing("validation-flow");
+	useApp.getState().startSectionProcessing("metadata-retention-logic");
+
+	assert.deepEqual(useApp.getState().processingSectionIds, [
+		"metadata-retention-logic",
+		"validation-flow",
+	]);
+
+	useApp.getState().finishSectionProcessing("metadata-retention-logic");
+
+	assert.deepEqual(useApp.getState().processingSectionIds, ["validation-flow"]);
 });
 
 test("pending diff references dedupe by file side and line range", async () => {
@@ -681,14 +924,13 @@ test("addReviewSectionItem stores readable files and feedback", async () => {
 				file_path: "src/lib.rs",
 				line: 24,
 			},
-		],
-		uncovered_scenarios: [
 			{
 				text: "No test for an empty input.",
 				severity: "low",
+				file_path: "src/lib.rs",
+				line: 24,
 			},
 		],
-		test_coverage_notes: "Happy path covered.",
 		base_ref: "base",
 		head_ref: "head",
 		pause_prompt: "Questions?",
@@ -699,7 +941,7 @@ test("addReviewSectionItem stores readable files and feedback", async () => {
 	assert.deepEqual(item?.section.files, ["src/lib.rs", "src/main.rs"]);
 	assert.equal(item?.section.concerns[0]?.text, "Missing empty input check.");
 	assert.equal(
-		item?.section.uncovered_scenarios[0]?.text,
+		item?.section.concerns[1]?.text,
 		"No test for an empty input.",
 	);
 });

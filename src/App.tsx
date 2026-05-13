@@ -188,12 +188,12 @@ export default function App() {
 		const registered: Unlisten[] = [];
 
 		const handleSectionMap = async (p: SectionMapEvent) => {
-			recordClientTelemetry("client.acp.section_map.received", {
-				"acp.session_id": p.session_id,
-				"section.count": p.map.sections.length,
-			});
-			setSectionMap(p.map.sections);
-			addSectionMapItem(p.map.sections);
+				recordClientTelemetry("client.acp.section_map.received", {
+					"acp.session_id": p.session_id,
+					"section.count": p.map.sections.length,
+				});
+				setSectionMap(p.map.sections);
+				if (!p.suppress_chat) addSectionMapItem(p.map.sections);
 			const sess = useApp.getState().session;
 			const sectionsWithRanges = sess
 				? await enrichSectionMapWithLocalRanges(sess, p.map.sections)
@@ -208,10 +208,10 @@ export default function App() {
 				"session.current_id": sess?.session_id,
 				"section.first_id": first?.section_id,
 				"section.count": sectionsWithRanges.length,
-				"auto_open.will_send": !!first && !!sess,
-			});
-			if (first && sess) {
-				try {
+					"auto_open.will_send": !!first && !!sess,
+				});
+				if (first && sess) {
+					try {
 					startSectionProcessing(first.section_id);
 					recordClientTelemetry("client.acp.section_map.auto_open_sending", {
 						"acp.session_id": sess.session_id,
@@ -222,16 +222,16 @@ export default function App() {
 						sess.published_comments ?? [],
 						sess.published_comments_error,
 					);
-					await acp.sendMessage(
-						sess.session_id,
-						`Walk me through the section "${first.title}" (\`${first.section_id}\`).\n\n${publishedCommentContext}\n\nEmit one feedback-only acp-section block for it and stop. Do not include files, ranges, unimportant_ranges, base_ref, or head_ref.`,
-						{
-							origin: "section_map_auto_open",
-							sectionId: first.section_id,
-							reason: "show_first_section_immediately",
-							suppressPreview: true,
-						},
-					);
+						await acp.startSectionTask({
+							parent_session_id: sess.session_id,
+							section_id: first.section_id,
+							title: first.title,
+							intent: first.intent,
+							files: first.files ?? [],
+							base_ref: sess.repo.base_ref,
+							head_ref: sess.repo.head_ref,
+							published_comment_context: publishedCommentContext,
+						});
 					recordClientTelemetry("client.acp.section_map.auto_open_sent", {
 						"acp.session_id": sess.session_id,
 						"section.id": first.section_id,
@@ -255,9 +255,15 @@ export default function App() {
 				"section.unimportant_range_count":
 					p.section.unimportant_ranges?.length ?? 0,
 				"section.concern_count": p.section.concerns.length,
+				"section.suppress_chat": p.suppress_chat ?? false,
 			});
 			upsertSection(p.section);
-			addReviewSectionItem(p.section);
+			const merged = useApp
+				.getState()
+				.sections.find((s) => s.id === p.section.section_id);
+			if (merged?.kind === "review_section" && merged.section) {
+				addReviewSectionItem(merged.section);
+			}
 		};
 
 		const handleSectionProgress = (p: SectionProgressEvent) => {

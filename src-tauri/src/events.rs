@@ -20,6 +20,7 @@ pub const EV_AGENT_STDERR: &str = "acp://agent-stderr";
 pub struct SectionMapEvent {
     pub session_id: String,
     pub map: SectionMap,
+    pub suppress_chat: bool,
     pub telemetry_context: TelemetryContext,
 }
 
@@ -27,6 +28,7 @@ pub struct SectionMapEvent {
 pub struct SectionEvent {
     pub session_id: String,
     pub section: ReviewSection,
+    pub suppress_chat: bool,
     pub telemetry_context: TelemetryContext,
 }
 

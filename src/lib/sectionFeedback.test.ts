@@ -16,8 +16,6 @@ function section(overrides: Partial<ReviewSection> = {}): ReviewSection {
 		ranges: [],
 		unimportant_ranges: [],
 		concerns: [],
-		uncovered_scenarios: [],
-		test_coverage_notes: "",
 		base_ref: "base",
 		head_ref: "head",
 		pause_prompt: "",
@@ -55,34 +53,6 @@ test("section concerns with file and line become diff annotations", () => {
 	]);
 });
 
-test("uncovered scenarios with file and line become diff annotations", () => {
-	const annotations = sectionFeedbackToDiffAnnotations(
-		section({
-			uncovered_scenarios: [
-				{
-					text: "No test covers a failed review submit.",
-					severity: "low",
-					file_path: "src/main.ts",
-					line: 20,
-				},
-			],
-		}),
-		["src/main.ts"],
-	);
-
-	assert.equal(annotations.length, 1);
-	assert.deepEqual(annotations[0]?.metadata.notes, [
-		{
-			kind: "uncovered_test",
-			label: "Uncovered test",
-			text: "No test covers a failed review submit.",
-			severity: "low",
-			file_path: "src/main.ts",
-			line: 20,
-		},
-	]);
-});
-
 test("feedback without a line is shown in top notes", () => {
 	const notes = sectionFeedbackTopNotes(
 		section({
@@ -106,22 +76,7 @@ test("feedback without a line is shown in top notes", () => {
 	]);
 });
 
-test("test coverage notes are shown in top notes", () => {
-	const notes = sectionFeedbackTopNotes(
-		section({ test_coverage_notes: "Happy path is covered." }),
-		["src/main.ts"],
-	);
-
-	assert.deepEqual(notes, [
-		{
-			kind: "test_coverage",
-			label: "Test coverage",
-			text: "Happy path is covered.",
-		},
-	]);
-});
-
-test("multiple feedback items on the same line are grouped", () => {
+test("multiple concerns on the same line are grouped", () => {
 	const annotations = sectionFeedbackToDiffAnnotations(
 		section({
 			concerns: [
@@ -131,8 +86,6 @@ test("multiple feedback items on the same line are grouped", () => {
 					file_path: "src/main.ts",
 					line: 12,
 				},
-			],
-			uncovered_scenarios: [
 				{
 					text: "No test covers this failure.",
 					severity: "low",
@@ -145,9 +98,10 @@ test("multiple feedback items on the same line are grouped", () => {
 	);
 
 	assert.equal(annotations.length, 1);
+	assert.equal(annotations[0]?.metadata.notes.length, 2);
 	assert.deepEqual(
-		annotations[0]?.metadata.notes.map((note) => note.label),
-		["Concern", "Uncovered test"],
+		annotations[0]?.metadata.notes.map((note) => note.text),
+		["This can fail silently.", "No test covers this failure."],
 	);
 });
 

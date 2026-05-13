@@ -75,8 +75,6 @@ const snapshot: ReviewSnapshot = {
 						line: 42,
 					},
 				],
-				uncovered_scenarios: [],
-				test_coverage_notes: "No test for empty coupons.",
 				base_ref: "origin/main",
 				head_ref: "guided-review-pr-787",
 				pause_prompt: "Want to comment on this?",

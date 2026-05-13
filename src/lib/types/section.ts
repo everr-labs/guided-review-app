@@ -34,8 +34,6 @@ export interface ReviewSection {
 	ranges: LineRange[];
 	unimportant_ranges: UnimportantRange[];
 	concerns: Concern[];
-	uncovered_scenarios: Concern[];
-	test_coverage_notes: string;
 	base_ref: string;
 	head_ref: string;
 	pause_prompt: string;
@@ -65,8 +63,6 @@ export interface SectionProgressUpdate {
 	ranges?: LineRange[];
 	unimportant_ranges?: UnimportantRange[];
 	concerns?: Concern[];
-	uncovered_scenarios?: Concern[];
-	test_coverage_notes?: string;
 	base_ref?: string;
 	head_ref?: string;
 }

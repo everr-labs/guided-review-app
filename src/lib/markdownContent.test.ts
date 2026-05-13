@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-	assistantPartsToMarkdown,
+	assistantPartsToBlocks,
 	stripMarkdownForSummary,
 } from "./markdownContent";
 import type { ChatMessagePart } from "./types/section";
@@ -15,7 +15,7 @@ test("stripMarkdownForSummary removes markdown markers for compact section label
 	);
 });
 
-test("assistantPartsToMarkdown keeps inline tool calls between markdown text", () => {
+test("assistantPartsToBlocks splits markdown and tool calls into separate blocks", () => {
 	const parts: ChatMessagePart[] = [
 		{ type: "markdown", text: "I will check" },
 		{
@@ -30,15 +30,57 @@ test("assistantPartsToMarkdown keeps inline tool calls between markdown text", (
 		{ type: "markdown", text: " and explain." },
 	];
 
-	assert.deepEqual(assistantPartsToMarkdown(parts), {
-		markdown: "I will check [Search repo](#gr-tool-call-tool-1) and explain.",
-		toolCalls: [
-			{
+	assert.deepEqual(assistantPartsToBlocks(parts), [
+		{ type: "markdown", markdown: "I will check" },
+		{
+			type: "tool_call",
+			toolCall: {
 				tool_call_id: "tool-1",
 				title: "Search repo",
 				kind: "search",
 				status: "in_progress",
 			},
-		],
-	});
+		},
+		{ type: "markdown", markdown: "and explain." },
+	]);
+});
+
+test("assistantPartsToBlocks drops whitespace-only markdown segments", () => {
+	const parts: ChatMessagePart[] = [
+		{ type: "markdown", text: "   \n\n" },
+		{
+			type: "tool_call",
+			toolCall: {
+				tool_call_id: "tool-1",
+				title: "Read file",
+				kind: "read",
+				status: "completed",
+			},
+		},
+	];
+
+	assert.deepEqual(assistantPartsToBlocks(parts), [
+		{
+			type: "tool_call",
+			toolCall: {
+				tool_call_id: "tool-1",
+				title: "Read file",
+				kind: "read",
+				status: "completed",
+			},
+		},
+	]);
+});
+
+test("assistantPartsToBlocks scrubs leftover acp-section-map fences", () => {
+	const parts: ChatMessagePart[] = [
+		{
+			type: "markdown",
+			text: "Here is the map:\n\n```acp-section-map\n{\"sections\": []}\n```\n\nDone.",
+		},
+	];
+
+	assert.deepEqual(assistantPartsToBlocks(parts), [
+		{ type: "markdown", markdown: "Here is the map:\n\nDone." },
+	]);
 });

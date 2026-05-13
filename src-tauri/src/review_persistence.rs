@@ -212,9 +212,7 @@ impl ReviewPersistence {
     }
 }
 
-pub fn target_from_source(
-    source: &crate::repo::SessionSource,
-) -> Option<ReviewPersistenceTarget> {
+pub fn target_from_source(source: &crate::repo::SessionSource) -> Option<ReviewPersistenceTarget> {
     match source {
         crate::repo::SessionSource::Pr { repo_url, number } => Some(ReviewPersistenceTarget {
             repo_url: repo_url.clone(),

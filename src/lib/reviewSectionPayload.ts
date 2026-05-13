@@ -157,11 +157,6 @@ export function parseReviewSectionPayload(
 			parseUnimportantRange,
 		),
 		concerns: parseArray(record.concerns, parseConcern),
-		uncovered_scenarios: parseArray(
-			record.uncovered_scenarios,
-			parseConcern,
-		),
-		test_coverage_notes: asString(record.test_coverage_notes) ?? "",
 		base_ref: asString(record.base_ref) ?? "",
 		head_ref: asString(record.head_ref) ?? "",
 		pause_prompt: asString(record.pause_prompt) ?? "",
@@ -188,11 +183,6 @@ export function parseSectionProgressPayload(
 		parseUnimportantRange,
 	);
 	const concerns = parseOptionalArray(record.concerns, parseConcern);
-	const uncovered_scenarios = parseOptionalArray(
-		record.uncovered_scenarios,
-		parseConcern,
-	);
-	const test_coverage_notes = asString(record.test_coverage_notes);
 	const base_ref = asString(record.base_ref);
 	const head_ref = asString(record.head_ref);
 	if (title) update.title = title;
@@ -201,10 +191,6 @@ export function parseSectionProgressPayload(
 	if (ranges) update.ranges = ranges;
 	if (unimportant_ranges) update.unimportant_ranges = unimportant_ranges;
 	if (concerns) update.concerns = concerns;
-	if (uncovered_scenarios) update.uncovered_scenarios = uncovered_scenarios;
-	if (test_coverage_notes !== null) {
-		update.test_coverage_notes = test_coverage_notes;
-	}
 	if (base_ref) update.base_ref = base_ref;
 	if (head_ref) update.head_ref = head_ref;
 	return update;

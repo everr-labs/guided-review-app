@@ -31,6 +31,8 @@ const CAPTURE_ASSISTANT_TEXT_ENV: &str = "GUIDED_REVIEW_CAPTURE_ASSISTANT_TEXT";
 
 pub struct AcpSession {
     pub session_id: String,
+    pub agent_kind: AgentKind,
+    pub cwd: PathBuf,
     prompt_tx: mpsc::UnboundedSender<PromptRequestMsg>,
     prompt_count: std::sync::atomic::AtomicU64,
     pub join: tokio::task::JoinHandle<()>,
@@ -47,6 +49,27 @@ struct PromptRequestMsg {
     origin: Option<String>,
     reason: Option<String>,
     section_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct SessionEventOptions {
+    event_session_id: Option<String>,
+    emit_text_chunks: bool,
+    emit_tool_calls: bool,
+    emit_turn_done: bool,
+    auto_shutdown_after_turn: bool,
+}
+
+impl Default for SessionEventOptions {
+    fn default() -> Self {
+        Self {
+            event_session_id: None,
+            emit_text_chunks: true,
+            emit_tool_calls: true,
+            emit_turn_done: true,
+            auto_shutdown_after_turn: false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -241,6 +264,15 @@ pub async fn start_session(
     agent_kind: AgentKind,
     cwd: PathBuf,
 ) -> Result<AcpSession> {
+    start_session_with_options(app, agent_kind, cwd, SessionEventOptions::default()).await
+}
+
+async fn start_session_with_options(
+    app: AppHandle,
+    agent_kind: AgentKind,
+    cwd: PathBuf,
+    event_options: SessionEventOptions,
+) -> Result<AcpSession> {
     let (session_id_tx, session_id_rx) = oneshot::channel::<String>();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<PromptRequestMsg>();
 
@@ -296,17 +328,21 @@ pub async fn start_session(
         );
     }
 
+    let session_cwd = cwd.clone();
     let join = tokio::spawn(async move {
         let transport = ByteStreams::new(child_stdin.compat_write(), child_stdout.compat());
         let app_for_notif = app_for_task.clone();
         let app_for_loop = app_for_task.clone();
+        let result_event_session_id = event_options.event_session_id.clone();
+        let options_for_notif = event_options.clone();
+        let options_for_loop = event_options.clone();
 
         let result = Client
             .builder()
             .name("guided-review")
             .on_receive_notification(
                 async move |notification: SessionNotification, _cx| {
-                    handle_notification(&app_for_notif, notification);
+                    handle_notification(&app_for_notif, notification, &options_for_notif);
                     Ok(())
                 },
                 on_receive_notification!(),
@@ -337,7 +373,7 @@ pub async fn start_session(
                 );
 
                 let section_progress_session_id =
-                    Arc::new(std::sync::Mutex::new(None::<String>));
+                    Arc::new(std::sync::Mutex::new(options_for_loop.event_session_id.clone()));
                 let section_progress_server = McpServer::<Agent, _>::builder("guided-review")
                     .instructions(
                         "Use guided_review_update_section only for review feedback. Do not send files or ranges; the section map and local Git own those.",
@@ -357,8 +393,14 @@ pub async fn start_session(
                 let session_id: SessionId = active_session.session_id().clone();
                 let session_id_str = session_id.to_string();
                 if let Ok(mut guard) = section_progress_session_id.lock() {
-                    *guard = Some(session_id_str.clone());
+                    if guard.is_none() {
+                        *guard = Some(session_id_str.clone());
+                    }
                 }
+                let event_session_id = options_for_loop
+                    .event_session_id
+                    .clone()
+                    .unwrap_or_else(|| session_id_str.clone());
                 let _ = session_id_tx.send(session_id_str.clone());
 
                 while let Some(msg) = prompt_rx.recv().await {
@@ -382,6 +424,7 @@ pub async fn start_session(
                                                     handle_notification(
                                                         &app_for_loop,
                                                         notification,
+                                                        &options_for_loop,
                                                     );
                                                     Ok(())
                                                 },
@@ -405,14 +448,16 @@ pub async fn start_session(
                                             max_overlap_len = summary.max_overlap_len,
                                             "turn complete",
                                         );
-                                        let _ = app_for_loop.emit(
-                                            EV_TURN_DONE,
-                                            TurnDoneEvent {
-                                                session_id: session_id_str.clone(),
-                                                stop_reason: stop,
-                                                telemetry_context: telemetry::current_context(),
-                                            },
-                                        );
+                                        if options_for_loop.emit_turn_done {
+                                            let _ = app_for_loop.emit(
+                                                EV_TURN_DONE,
+                                                TurnDoneEvent {
+                                                    session_id: event_session_id.clone(),
+                                                    stop_reason: stop,
+                                                    telemetry_context: telemetry::current_context(),
+                                                },
+                                            );
+                                        }
                                         break;
                                     }
                                     Ok(_) => {}
@@ -430,7 +475,7 @@ pub async fn start_session(
                                         );
                                         emit_error(
                                             &app_for_loop,
-                                            Some(session_id_str.clone()),
+                                            Some(event_session_id.clone()),
                                             format!("prompt failed: {e}"),
                                         );
                                         break;
@@ -450,7 +495,7 @@ pub async fn start_session(
                                 );
                                 emit_error(
                                     &app_for_loop,
-                                    Some(session_id_str.clone()),
+                                    Some(event_session_id.clone()),
                                     format!("prompt failed: {e}"),
                                 );
                             }
@@ -458,13 +503,20 @@ pub async fn start_session(
                     }
                     .instrument(turn_span)
                     .await;
+                    if options_for_loop.auto_shutdown_after_turn {
+                        break;
+                    }
                 }
                 Ok(())
             })
             .await;
 
         if let Err(e) = result {
-            emit_error(&app_for_task, None, format!("acp connection ended: {e}"));
+            emit_error(
+                &app_for_task,
+                result_event_session_id,
+                format!("acp connection ended: {e}"),
+            );
         }
 
         let _ = child.kill().await;
@@ -476,10 +528,62 @@ pub async fn start_session(
 
     Ok(AcpSession {
         session_id,
+        agent_kind,
+        cwd: session_cwd,
         prompt_tx,
         prompt_count: std::sync::atomic::AtomicU64::new(0),
         join,
     })
+}
+
+pub fn spawn_section_task(
+    app: AppHandle,
+    agent_kind: AgentKind,
+    cwd: PathBuf,
+    parent_session_id: String,
+    prompt: String,
+    section_id: String,
+) {
+    tokio::spawn(async move {
+        let options = SessionEventOptions {
+            event_session_id: Some(parent_session_id.clone()),
+            emit_text_chunks: false,
+            emit_tool_calls: false,
+            emit_turn_done: false,
+            auto_shutdown_after_turn: true,
+        };
+        match start_session_with_options(app.clone(), agent_kind, cwd, options).await {
+            Ok(sess) => {
+                if let Err(e) = sess.send_prompt(
+                    prompt,
+                    Some("section_background_task".to_string()),
+                    Some("load_section_feedback".to_string()),
+                    Some(section_id),
+                ) {
+                    emit_error(
+                        &app,
+                        Some(parent_session_id),
+                        format!("section task failed to start: {e}"),
+                    );
+                    return;
+                }
+                if let Err(e) = sess.join.await {
+                    emit_error(
+                        &app,
+                        Some(parent_session_id),
+                        format!("section task failed: {e}"),
+                    );
+                }
+            }
+            Err(e) => {
+                emit_error(
+                    &app,
+                    Some(parent_session_id),
+                    format!("section task failed to start: {e}"),
+                );
+            }
+        }
+    });
 }
 
 impl AcpSession {
@@ -506,8 +610,12 @@ impl AcpSession {
     }
 }
 
-fn handle_notification(app: &AppHandle, notif: SessionNotification) {
+fn handle_notification(app: &AppHandle, notif: SessionNotification, options: &SessionEventOptions) {
     let session_id = notif.session_id.to_string();
+    let event_session_id = options
+        .event_session_id
+        .as_deref()
+        .unwrap_or(session_id.as_str());
     let _span = tracing::debug_span!("acp.notification", session_id = %session_id).entered();
     match notif.update {
         SessionUpdate::AgentMessageChunk(chunk) => {
@@ -562,16 +670,24 @@ fn handle_notification(app: &AppHandle, notif: SessionNotification) {
                     "agent_message_chunk_overlap_detected",
                 );
             }
-            buffers().append(app, &session_id, &text);
-            let _ = app.emit(
-                EV_TEXT_CHUNK,
-                TextChunkEvent {
-                    session_id,
-                    message_id: format!("turn-{}", Uuid::new_v4()),
-                    text,
-                    telemetry_context: telemetry::current_context(),
-                },
+            buffers().append(
+                app,
+                &session_id,
+                event_session_id,
+                &text,
+                !options.emit_text_chunks,
             );
+            if options.emit_text_chunks {
+                let _ = app.emit(
+                    EV_TEXT_CHUNK,
+                    TextChunkEvent {
+                        session_id: event_session_id.to_string(),
+                        message_id: format!("turn-{}", Uuid::new_v4()),
+                        text,
+                        telemetry_context: telemetry::current_context(),
+                    },
+                );
+            }
         }
         SessionUpdate::AgentThoughtChunk(_) | SessionUpdate::UserMessageChunk(_) => {}
         SessionUpdate::ToolCall(tc) => {
@@ -582,11 +698,15 @@ fn handle_notification(app: &AppHandle, notif: SessionNotification) {
                 status = ?tc.status,
                 "tool_call",
             );
-            emit_tool_call(app, &session_id, &tc);
+            if options.emit_tool_calls {
+                emit_tool_call(app, event_session_id, &tc);
+            }
         }
         SessionUpdate::ToolCallUpdate(tcu) => {
             tracing::info!(tool_call_id = %tcu.tool_call_id, "tool_call_update");
-            emit_tool_call_update(app, &session_id, &tcu);
+            if options.emit_tool_calls {
+                emit_tool_call_update(app, event_session_id, &tcu);
+            }
         }
         _ => {}
     }

@@ -31,6 +31,7 @@ pub fn run() {
             check_gh_cli_cmd,
             start_session_cmd,
             send_message_cmd,
+            start_section_task_cmd,
             end_session_cmd,
             get_file_at_ref_cmd,
             get_diff_cmd,

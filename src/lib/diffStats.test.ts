@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { computeFileDiffStats, formatFileDiffStats } from "./diffStats";
+import {
+	computeFileDiffStats,
+	formatFileDiffStats,
+	isDeletionOnlyDiff,
+} from "./diffStats";
 
 test("computeFileDiffStats reports zero adds and removes for identical text", () => {
 	const stats = computeFileDiffStats("a.ts", "hello\n", "hello\n");
@@ -23,4 +27,20 @@ test("computeFileDiffStats treats a brand new file as pure additions", () => {
 
 test("formatFileDiffStats prints a compact summary", () => {
 	assert.equal(formatFileDiffStats({ additions: 12, deletions: 4 }), "+12 −4");
+});
+
+test("isDeletionOnlyDiff is true when only lines were removed", () => {
+	assert.equal(isDeletionOnlyDiff({ additions: 0, deletions: 3 }), true);
+});
+
+test("isDeletionOnlyDiff is false for mixed add and delete diffs", () => {
+	assert.equal(isDeletionOnlyDiff({ additions: 2, deletions: 3 }), false);
+});
+
+test("isDeletionOnlyDiff is false for pure addition diffs", () => {
+	assert.equal(isDeletionOnlyDiff({ additions: 5, deletions: 0 }), false);
+});
+
+test("isDeletionOnlyDiff is false when the file is unchanged", () => {
+	assert.equal(isDeletionOnlyDiff({ additions: 0, deletions: 0 }), false);
 });

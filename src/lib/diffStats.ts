@@ -43,3 +43,7 @@ function fallbackLineDelta(oldText: string, newText: string): FileDiffStats {
 export function formatFileDiffStats(stats: FileDiffStats): string {
 	return `+${stats.additions} −${stats.deletions}`;
 }
+
+export function isDeletionOnlyDiff(stats: FileDiffStats): boolean {
+	return stats.additions === 0 && stats.deletions > 0;
+}

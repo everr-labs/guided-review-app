@@ -37,10 +37,6 @@ struct SectionWire {
     #[serde(default)]
     concerns: Vec<crate::section::Concern>,
     #[serde(default)]
-    uncovered_scenarios: Vec<crate::section::Concern>,
-    #[serde(default)]
-    test_coverage_notes: String,
-    #[serde(default)]
     base_ref: String,
     #[serde(default)]
     head_ref: String,
@@ -59,9 +55,16 @@ impl FencedBuffers {
         }
     }
 
-    pub fn append(&self, app: &AppHandle, session_id: &str, chunk: &str) {
+    pub fn append(
+        &self,
+        app: &AppHandle,
+        buffer_id: &str,
+        event_session_id: &str,
+        chunk: &str,
+        suppress_chat: bool,
+    ) {
         let mut guard = self.inner.lock().expect("poisoned");
-        let buf = guard.entry(session_id.to_string()).or_default();
+        let buf = guard.entry(buffer_id.to_string()).or_default();
         buf.push_str(chunk);
         let extracted = extract_fenced_blocks(buf);
         if extracted.is_empty() {
@@ -73,7 +76,7 @@ impl FencedBuffers {
         drop(guard);
 
         for (tag, body, _) in extracted {
-            handle_block(app, session_id, &tag, &body);
+            handle_block(app, event_session_id, &tag, &body, suppress_chat);
         }
     }
 }
@@ -97,7 +100,7 @@ fn snippet(body: &str) -> String {
     s
 }
 
-fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
+fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str, suppress_chat: bool) {
     match tag {
         TAG_SECTION_MAP => match parse_lenient::<SectionMapWire>(body) {
             Ok(wire) => {
@@ -121,6 +124,7 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     SectionMapEvent {
                         session_id: session_id.to_string(),
                         map,
+                        suppress_chat,
                         telemetry_context: telemetry::current_context(),
                     },
                 );
@@ -148,8 +152,6 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     ranges: wire.ranges,
                     unimportant_ranges: wire.unimportant_ranges,
                     concerns: wire.concerns,
-                    uncovered_scenarios: wire.uncovered_scenarios,
-                    test_coverage_notes: wire.test_coverage_notes,
                     base_ref: wire.base_ref,
                     head_ref: wire.head_ref,
                     pause_prompt: wire.pause_prompt,
@@ -174,6 +176,7 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str) {
                     SectionEvent {
                         session_id: session_id.to_string(),
                         section,
+                        suppress_chat,
                         telemetry_context: telemetry::current_context(),
                     },
                 );

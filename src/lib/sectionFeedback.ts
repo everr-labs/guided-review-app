@@ -1,14 +1,11 @@
 import type { DiffLineAnnotation } from "@pierre/diffs";
 import type { Concern, ReviewSection, Severity } from "./types/section";
 
-export type SectionFeedbackKind =
-	| "concern"
-	| "uncovered_test"
-	| "test_coverage";
+export type SectionFeedbackKind = "concern";
 
 export interface SectionFeedbackNote {
 	kind: SectionFeedbackKind;
-	label: "Concern" | "Uncovered test" | "Test coverage";
+	label: "Concern";
 	text: string;
 	severity?: Severity;
 	file_path?: string;
@@ -26,16 +23,12 @@ function visibleFileSet(visibleFiles: Iterable<string>): Set<string> {
 	return visibleFiles instanceof Set ? visibleFiles : new Set(visibleFiles);
 }
 
-function concernNote(
-	kind: "concern" | "uncovered_test",
-	label: "Concern" | "Uncovered test",
-	concern: Concern,
-): SectionFeedbackNote | null {
+function concernNote(concern: Concern): SectionFeedbackNote | null {
 	const text = concern.text.trim();
 	if (!text) return null;
 	const note: SectionFeedbackNote = {
-		kind,
-		label,
+		kind: "concern",
+		label: "Concern",
 		text,
 		severity: concern.severity,
 	};
@@ -45,24 +38,9 @@ function concernNote(
 }
 
 function lineFeedbackNotes(section: ReviewSection): SectionFeedbackNote[] {
-	return [
-		...section.concerns.map((concern) =>
-			concernNote("concern", "Concern", concern),
-		),
-		...section.uncovered_scenarios.map((scenario) =>
-			concernNote("uncovered_test", "Uncovered test", scenario),
-		),
-	].filter((note): note is SectionFeedbackNote => note !== null);
-}
-
-function testCoverageNote(section: ReviewSection): SectionFeedbackNote | null {
-	const text = section.test_coverage_notes.trim();
-	if (!text) return null;
-	return {
-		kind: "test_coverage",
-		label: "Test coverage",
-		text,
-	};
+	return section.concerns
+		.map((concern) => concernNote(concern))
+		.filter((note): note is SectionFeedbackNote => note !== null);
 }
 
 function hasVisibleLine(
@@ -115,8 +93,6 @@ export function sectionFeedbackTopNotes(
 ): SectionFeedbackNote[] {
 	const visible = visibleFileSet(visibleFiles);
 	const notes: SectionFeedbackNote[] = [];
-	const coverage = testCoverageNote(section);
-	if (coverage) notes.push(coverage);
 
 	for (const note of lineFeedbackNotes(section)) {
 		if (hasVisibleLine(note, visible)) continue;
