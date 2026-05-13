@@ -21,6 +21,7 @@ import type { LocalProject } from "./projectSource";
 import { clearLastProjectPath, saveLastProjectPath } from "./projectSource";
 import type { DiffFocusRange } from "./diffFocus";
 import { recordClientTelemetry, truncateTelemetryText } from "./telemetry";
+import type { ReviewSnapshot } from "./reviewPersistence";
 
 export interface SessionInfo {
 	session_id: string;
@@ -37,8 +38,6 @@ export const PR_DESCRIPTION_SECTION_ID = "pr-description";
 function hasSectionFeedback(section: ReviewSection): boolean {
 	return (
 		section.concerns.length > 0 ||
-		section.uncovered_scenarios.length > 0 ||
-		section.test_coverage_notes.trim().length > 0 ||
 		section.pause_prompt.trim().length > 0
 	);
 }
@@ -58,8 +57,6 @@ function emptyFeedbackSection(
 		ranges: [],
 		unimportant_ranges: [],
 		concerns: [],
-		uncovered_scenarios: [],
-		test_coverage_notes: "",
 		base_ref: session?.repo.base_ref ?? "",
 		head_ref: session?.repo.head_ref ?? "",
 		pause_prompt: "",
@@ -121,10 +118,6 @@ function mergeSectionProgress(
 		unimportant_ranges:
 			update.unimportant_ranges ?? previous?.unimportant_ranges ?? [],
 		concerns: update.concerns ?? previous?.concerns ?? [],
-		uncovered_scenarios:
-			update.uncovered_scenarios ?? previous?.uncovered_scenarios ?? [],
-		test_coverage_notes:
-			update.test_coverage_notes ?? previous?.test_coverage_notes ?? "",
 		base_ref: update.base_ref ?? previous?.base_ref ?? session?.repo.base_ref ?? "",
 		head_ref: update.head_ref ?? previous?.head_ref ?? session?.repo.head_ref ?? "",
 		pause_prompt: previous?.pause_prompt ?? "",
@@ -149,8 +142,6 @@ function mergeSectionFeedback(
 			? previous.unimportant_ranges
 			: section.unimportant_ranges ?? [],
 		concerns: section.concerns ?? [],
-		uncovered_scenarios: section.uncovered_scenarios ?? [],
-		test_coverage_notes: section.test_coverage_notes ?? "",
 		base_ref: previousHasStructure
 			? previous?.base_ref ?? ""
 			: section.base_ref || session?.repo.base_ref || "",
@@ -206,7 +197,7 @@ interface AppState {
 	session: SessionInfo | null;
 	sections: SectionState[];
 	currentSectionId: string | null;
-	processingSectionId: string | null;
+	processingSectionIds: string[];
 	chat: ChatMessage[];
 	commentDrafts: CommentDraftState[];
 	publishedComments: PublishedPrComment[];
@@ -223,6 +214,7 @@ interface AppState {
 
 	setProject: (p: LocalProject | null) => void;
 	setSession: (s: SessionInfo | null) => void;
+	restoreSavedReview: (session: SessionInfo, snapshot: ReviewSnapshot) => void;
 	reset: () => void;
 	setSectionMap: (entries: SectionMapEntry[]) => void;
 	upsertSection: (section: ReviewSection) => void;
@@ -340,11 +332,11 @@ function appendStreamingText(
 }
 
 const STRUCTURED_REVIEW_BLOCK_RE =
-	/```(?:acp-section-map|acp-section|acp-comment-draft|acp-comment-result)[^\n]*\n[\s\S]*?\n```[ \t]*(?:\r?\n)?/g;
+	/```[ \t]*(?:acp-section-map|acp-section|acp-comment-draft|acp-comment-result)[^\n]*\n[\s\S]*?\n```[ \t]*(?:\r?\n)?/g;
 const STRUCTURED_REVIEW_BLOCK_START_RE =
-	/```(?:acp-section-map|acp-section|acp-comment-draft|acp-comment-result)[^\n]*\r?\n/g;
+	/```[ \t]*(?:acp-section-map|acp-section|acp-comment-draft|acp-comment-result)[^\n]*\r?\n/g;
 
-function cleanVisibleStructuredText(text: string): string {
+export function cleanVisibleStructuredText(text: string): string {
 	return text
 		.replace(STRUCTURED_REVIEW_BLOCK_RE, "")
 		.replace(/[ \t]+\r?\n/g, "\n")
@@ -454,12 +446,20 @@ function readableAssistantMessage(item: ChatItem): ChatMessage {
 	};
 }
 
+function addProcessingSectionId(ids: string[], id: string): string[] {
+	return ids.includes(id) ? ids : [...ids, id];
+}
+
+function removeProcessingSectionId(ids: string[], id: string): string[] {
+	return ids.filter((current) => current !== id);
+}
+
 export const useApp = create<AppState>((set) => ({
 	project: null,
 	session: null,
 	sections: [],
 	currentSectionId: null,
-	processingSectionId: null,
+	processingSectionIds: [],
 	chat: [],
 	commentDrafts: [],
 	publishedComments: [],
@@ -485,266 +485,289 @@ export const useApp = create<AppState>((set) => ({
 				"project.previous_path": state.project?.path,
 				"project.cleared_session": !samePath && !!state.session,
 			});
-			if (samePath) {
-				return { project: p };
-			}
-			return {
-				project: p,
-				session: null,
-				sections: [],
-				currentSectionId: null,
-				processingSectionId: null,
-				chat: [],
+				if (samePath) {
+					return { project: p };
+				}
+				return {
+					project: p,
+					session: null,
+					sections: [],
+					currentSectionId: null,
+					processingSectionIds: [],
+					chat: [],
+					commentDrafts: [],
+					publishedComments: [],
+					publishedCommentsFetchedAt: null,
+					publishedCommentsError: null,
+					streaming: false,
+					structuredReviewBlockOpen: false,
+					diffFocus: null,
+					diffFocusError: null,
+					pendingDiffReferences: [],
+				};
+			}),
+
+		setSession: (s) => {
+			recordClientTelemetry("client.store.session.set", {
+				"acp.session_id": s?.session_id,
+				"repo.display_slug": s?.repo.display_slug,
+				"repo.base_ref": s?.repo.base_ref,
+				"repo.head_ref": s?.repo.head_ref,
+				"session.source.kind": s?.source.kind,
+				"pull_request.has_metadata": !!s?.pull_request,
+				"pull_request.has_error": !!s?.pull_request_error,
+			});
+			const prDescription = prDescriptionFromSession(s);
+			set({
+				session: s,
+				sections: prDescription ? [prDescription] : [],
+				currentSectionId: prDescription ? prDescription.id : null,
 				commentDrafts: [],
-				publishedComments: [],
-				publishedCommentsFetchedAt: null,
-				publishedCommentsError: null,
+				publishedComments: s?.published_comments ?? [],
+				publishedCommentsFetchedAt: s ? Date.now() : null,
+				publishedCommentsError: s?.published_comments_error ?? null,
+				pendingDiffReferences: [],
+			});
+		},
+		restoreSavedReview: (session, snapshot) => {
+			recordClientTelemetry("client.store.saved_review.restored", {
+				"acp.session_id": session.session_id,
+				"repo.display_slug": session.repo.display_slug,
+				"repo.base_ref": session.repo.base_ref,
+				"repo.head_ref": session.repo.head_ref,
+				"session.source.kind": session.source.kind,
+				"section.current_id": snapshot.current_section_id,
+				"section.count": snapshot.sections.length,
+				"chat.count": snapshot.chat.length,
+				"comment_draft.count": snapshot.comment_drafts.length,
+			});
+			set({
+				session,
+				sections: snapshot.sections,
+				currentSectionId: snapshot.current_section_id,
+				processingSectionIds: [],
+				chat: snapshot.chat,
+				commentDrafts: snapshot.comment_drafts,
+				publishedComments: snapshot.published_comments,
+				publishedCommentsFetchedAt: Date.now(),
+				publishedCommentsError: snapshot.published_comments_error,
 				streaming: false,
 				structuredReviewBlockOpen: false,
 				diffFocus: null,
 				diffFocusError: null,
 				pendingDiffReferences: [],
-			};
-		}),
-
-	setSession: (s) => {
-		recordClientTelemetry("client.store.session.set", {
-			"acp.session_id": s?.session_id,
-			"repo.display_slug": s?.repo.display_slug,
-			"repo.base_ref": s?.repo.base_ref,
-			"repo.head_ref": s?.repo.head_ref,
-			"session.source.kind": s?.source.kind,
-			"pull_request.has_metadata": !!s?.pull_request,
-			"pull_request.has_error": !!s?.pull_request_error,
-		});
-		const prDescription = prDescriptionFromSession(s);
-		set({
-			session: s,
-			sections: prDescription ? [prDescription] : [],
-			currentSectionId: prDescription ? prDescription.id : null,
-			commentDrafts: [],
-			publishedComments: s?.published_comments ?? [],
-			publishedCommentsFetchedAt: s ? Date.now() : null,
-			publishedCommentsError: s?.published_comments_error ?? null,
-			pendingDiffReferences: [],
-		});
-	},
-	reset: () =>
-		set((state) => {
-			recordClientTelemetry("client.store.reset", {
-				"acp.session_id": state.session?.session_id,
-				"section.current_id": state.currentSectionId,
-				"section.count": state.sections.length,
-				"chat.count": state.chat.length,
 			});
-			return {
-				session: null,
-				sections: [],
-				currentSectionId: null,
-				processingSectionId: null,
-				chat: [],
-				commentDrafts: [],
-				publishedComments: [],
-				publishedCommentsFetchedAt: null,
-				publishedCommentsError: null,
-				streaming: false,
-				structuredReviewBlockOpen: false,
-				diffFocus: null,
-				diffFocusError: null,
-				pendingDiffReferences: [],
-			};
-		}),
+		},
+		reset: () =>
+			set((state) => {
+				recordClientTelemetry("client.store.reset", {
+					"acp.session_id": state.session?.session_id,
+					"section.current_id": state.currentSectionId,
+					"section.count": state.sections.length,
+					"chat.count": state.chat.length,
+				});
+				return {
+					session: null,
+					sections: [],
+					currentSectionId: null,
+					processingSectionIds: [],
+					chat: [],
+					commentDrafts: [],
+					publishedComments: [],
+					publishedCommentsFetchedAt: null,
+					publishedCommentsError: null,
+					streaming: false,
+					structuredReviewBlockOpen: false,
+					diffFocus: null,
+					diffFocusError: null,
+					pendingDiffReferences: [],
+				};
+			}),
 
-	setSectionMap: (entries) =>
-		set((state) => {
-			recordClientTelemetry("client.store.section_map.set", {
-				"acp.session_id": state.session?.session_id,
-				"section.count": entries.length,
-				"section.first_id": entries[0]?.section_id,
-				"section.previous_current_id": state.currentSectionId,
-				"section.previous_count": state.sections.length,
-			});
-			const prDescription = state.sections.find(
-				(section): section is PrDescriptionSectionState =>
-					section.kind === "pr_description",
-			);
-			const existingReviewSections = new Map(
-				state.sections
-					.filter(
-						(section): section is ReviewSectionState =>
-							section.kind === "review_section",
-					)
-					.map((section) => [section.id, section]),
-			);
-			return {
-				sections: [
-					...(prDescription ? [prDescription] : []),
-					...entries.map((e): ReviewSectionState => {
-						const existing = existingReviewSections.get(e.section_id);
-						const section = mergeMapEntrySection(e, existing, state.session);
-						return {
-							id: e.section_id,
-							kind: "review_section",
-							title: e.title,
-							intent: e.intent,
-							status:
-								existing?.status === "completed"
-									? "completed"
-									: section && hasSectionFeedback(section)
-										? "in_review"
-										: "pending",
-							section,
-						};
-					}),
-				],
-			};
-		}),
+		setSectionMap: (entries) =>
+			set((state) => {
+				recordClientTelemetry("client.store.section_map.set", {
+					"acp.session_id": state.session?.session_id,
+					"section.count": entries.length,
+					"section.first_id": entries[0]?.section_id,
+					"section.previous_current_id": state.currentSectionId,
+					"section.previous_count": state.sections.length,
+				});
+				const prDescription = state.sections.find(
+					(section): section is PrDescriptionSectionState =>
+						section.kind === "pr_description",
+				);
+				const existingReviewSections = new Map(
+					state.sections
+						.filter(
+							(section): section is ReviewSectionState =>
+								section.kind === "review_section",
+						)
+						.map((section) => [section.id, section]),
+				);
+				return {
+					sections: [
+						...(prDescription ? [prDescription] : []),
+						...entries.map((e): ReviewSectionState => {
+							const existing = existingReviewSections.get(e.section_id);
+							const section = mergeMapEntrySection(e, existing, state.session);
+							return {
+								id: e.section_id,
+								kind: "review_section",
+								title: e.title,
+								intent: e.intent,
+								status:
+									existing?.status === "completed"
+										? "completed"
+										: section && hasSectionFeedback(section)
+											? "in_review"
+											: "pending",
+								section,
+							};
+						}),
+					],
+				};
+			}),
 
-	upsertSection: (section) =>
-		set((state) => {
-			const sections = [...state.sections];
-			const idx = sections.findIndex((s) => s.id === section.section_id);
-			const existing =
-				idx >= 0 && sections[idx]?.kind === "review_section"
-					? sections[idx]
-					: undefined;
-			const previousCurrentId = state.currentSectionId;
-			const previousStatus = idx >= 0 ? sections[idx].status : undefined;
-			const normalizedSection = mergeSectionFeedback(
-				section,
-				existing,
-				state.session,
-			);
-			const updated: ReviewSectionState = {
-				id: section.section_id,
-				kind: "review_section",
-				title: normalizedSection.title,
-				intent: normalizedSection.intent,
-				status: "in_review",
-				section: normalizedSection,
-			};
-			if (idx >= 0) sections[idx] = updated;
-			else sections.push(updated);
-			const nextCurrentId =
-				state.currentSectionId === PR_DESCRIPTION_SECTION_ID
-					? state.currentSectionId
-					: section.section_id;
-			recordClientTelemetry("client.store.section.upserted", {
-				"acp.session_id": state.session?.session_id,
-				"section.id": section.section_id,
-				"section.index": idx,
-				"section.was_known": idx >= 0,
-				"section.previous_status": previousStatus,
-				"section.previous_current_id": previousCurrentId,
-				"section.next_current_id": nextCurrentId,
-				"section.processing_id": state.processingSectionId,
-				"section.file_count": normalizedSection.files.length,
-				"section.unimportant_range_count":
-					section.unimportant_ranges?.length ?? 0,
-			});
-			return {
-				sections,
-				currentSectionId: nextCurrentId,
-				processingSectionId:
-					state.processingSectionId === section.section_id
-						? null
-						: state.processingSectionId,
-			};
-		}),
+		upsertSection: (section) =>
+			set((state) => {
+				const sections = [...state.sections];
+				const idx = sections.findIndex((s) => s.id === section.section_id);
+				const existing =
+					idx >= 0 && sections[idx]?.kind === "review_section"
+						? sections[idx]
+						: undefined;
+				const previousStatus = idx >= 0 ? sections[idx].status : undefined;
+				const normalizedSection = mergeSectionFeedback(
+					section,
+					existing,
+					state.session,
+				);
+				const updated: ReviewSectionState = {
+					id: section.section_id,
+					kind: "review_section",
+					title: normalizedSection.title,
+					intent: normalizedSection.intent,
+					status: "in_review",
+					section: normalizedSection,
+				};
+				if (idx >= 0) sections[idx] = updated;
+				else sections.push(updated);
+				recordClientTelemetry("client.store.section.upserted", {
+					"acp.session_id": state.session?.session_id,
+					"section.id": section.section_id,
+					"section.index": idx,
+					"section.was_known": idx >= 0,
+					"section.previous_status": previousStatus,
+					"section.current_id": state.currentSectionId,
+					"section.processing_ids": state.processingSectionIds.join(","),
+					"section.file_count": normalizedSection.files.length,
+					"section.unimportant_range_count":
+						section.unimportant_ranges?.length ?? 0,
+				});
+				return {
+					sections,
+					processingSectionIds: removeProcessingSectionId(
+						state.processingSectionIds,
+						section.section_id,
+					),
+				};
+			}),
 
-	upsertSectionProgress: (update) =>
-		set((state) => {
-			const sections = [...state.sections];
-			const idx = sections.findIndex((s) => s.id === update.section_id);
-			const existing =
-				idx >= 0 && sections[idx]?.kind === "review_section"
-					? sections[idx]
-					: undefined;
-			const section = mergeSectionProgress(update, existing, state.session);
-			const updated: ReviewSectionState = {
-				id: update.section_id,
-				kind: "review_section",
-				title: section.title,
-				intent: section.intent,
-				status: "in_review",
-				section,
-			};
-			if (idx >= 0) sections[idx] = updated;
-			else sections.push(updated);
-			const nextCurrentId =
-				state.currentSectionId === PR_DESCRIPTION_SECTION_ID
-					? state.currentSectionId
-					: update.section_id;
-			recordClientTelemetry("client.store.section_progress.upserted", {
-				"acp.session_id": state.session?.session_id,
-				"section.id": update.section_id,
-				"section.phase": update.phase,
-				"section.index": idx,
-				"section.was_known": idx >= 0,
-				"section.previous_current_id": state.currentSectionId,
-				"section.next_current_id": nextCurrentId,
-				"section.file_count": section.files.length,
-				"section.unimportant_range_count": section.unimportant_ranges.length,
-				"section.concern_count": section.concerns.length,
-			});
-			return {
-				sections,
-				currentSectionId: nextCurrentId,
-				processingSectionId: update.section_id,
-			};
-		}),
+		upsertSectionProgress: (update) =>
+			set((state) => {
+				const sections = [...state.sections];
+				const idx = sections.findIndex((s) => s.id === update.section_id);
+				const existing =
+					idx >= 0 && sections[idx]?.kind === "review_section"
+						? sections[idx]
+						: undefined;
+				const section = mergeSectionProgress(update, existing, state.session);
+				const updated: ReviewSectionState = {
+					id: update.section_id,
+					kind: "review_section",
+					title: section.title,
+					intent: section.intent,
+					status: "in_review",
+					section,
+				};
+				if (idx >= 0) sections[idx] = updated;
+				else sections.push(updated);
+				recordClientTelemetry("client.store.section_progress.upserted", {
+					"acp.session_id": state.session?.session_id,
+					"section.id": update.section_id,
+					"section.phase": update.phase,
+					"section.index": idx,
+					"section.was_known": idx >= 0,
+					"section.current_id": state.currentSectionId,
+					"section.file_count": section.files.length,
+					"section.unimportant_range_count": section.unimportant_ranges.length,
+					"section.concern_count": section.concerns.length,
+				});
+				return {
+					sections,
+					processingSectionIds: addProcessingSectionId(
+						state.processingSectionIds,
+						update.section_id,
+					),
+				};
+			}),
 
-	markSectionCompleted: (id) =>
-		set((state) => {
-			recordClientTelemetry("client.store.section.completed", {
-				"acp.session_id": state.session?.session_id,
-				"section.id": id,
-				"section.current_id": state.currentSectionId,
-			});
-			return {
-				sections: state.sections.map((s) =>
-					s.id === id ? { ...s, status: "completed" } : s,
-				),
-			};
-		}),
+		markSectionCompleted: (id) =>
+			set((state) => {
+				recordClientTelemetry("client.store.section.completed", {
+					"acp.session_id": state.session?.session_id,
+					"section.id": id,
+					"section.current_id": state.currentSectionId,
+				});
+				return {
+					sections: state.sections.map((s) =>
+						s.id === id ? { ...s, status: "completed" } : s,
+					),
+				};
+			}),
 
-	setCurrentSection: (id, reason = "unknown") =>
-		set((state) => {
-			recordClientTelemetry("client.store.current_section.set", {
-				"acp.session_id": state.session?.session_id,
-				"section.previous_current_id": state.currentSectionId,
-				"section.next_current_id": id,
-				"section.set_reason": reason,
-			});
-			return { currentSectionId: id };
-		}),
+		setCurrentSection: (id, reason = "unknown") =>
+			set((state) => {
+				recordClientTelemetry("client.store.current_section.set", {
+					"acp.session_id": state.session?.session_id,
+					"section.previous_current_id": state.currentSectionId,
+					"section.next_current_id": id,
+					"section.set_reason": reason,
+				});
+				return { currentSectionId: id };
+			}),
 
-	startSectionProcessing: (id) =>
-		set((state) => {
-			recordClientTelemetry("client.store.section_processing.started", {
-				"acp.session_id": state.session?.session_id,
-				"section.previous_processing_id": state.processingSectionId,
-				"section.next_processing_id": id,
-			});
-			return {
-				currentSectionId:
-					state.currentSectionId === PR_DESCRIPTION_SECTION_ID
-						? state.currentSectionId
-						: id,
-				processingSectionId: id,
-			};
-		}),
+		startSectionProcessing: (id) =>
+			set((state) => {
+				recordClientTelemetry("client.store.section_processing.started", {
+					"acp.session_id": state.session?.session_id,
+					"section.previous_processing_ids": state.processingSectionIds.join(","),
+					"section.next_processing_id": id,
+					"section.current_id": state.currentSectionId,
+				});
+				return {
+					processingSectionIds: addProcessingSectionId(
+						state.processingSectionIds,
+						id,
+					),
+				};
+			}),
 
-	finishSectionProcessing: (id = null) =>
-		set((state) => {
-			if (id && state.processingSectionId !== id) return {};
-			recordClientTelemetry("client.store.section_processing.finished", {
-				"acp.session_id": state.session?.session_id,
-				"section.previous_processing_id": state.processingSectionId,
-				"section.finished_id": id,
-			});
-			return { processingSectionId: null };
-		}),
+		finishSectionProcessing: (id = null) =>
+			set((state) => {
+				if (id && !state.processingSectionIds.includes(id)) return {};
+				recordClientTelemetry("client.store.section_processing.finished", {
+					"acp.session_id": state.session?.session_id,
+					"section.previous_processing_ids": state.processingSectionIds.join(","),
+					"section.finished_id": id,
+				});
+				return {
+					processingSectionIds: id
+						? removeProcessingSectionId(state.processingSectionIds, id)
+						: [],
+				};
+			}),
 
 	addUserMessage: (text) =>
 		set((state) => ({

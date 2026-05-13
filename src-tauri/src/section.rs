@@ -58,8 +58,6 @@ pub struct ReviewSection {
     #[serde(default)]
     pub unimportant_ranges: Vec<UnimportantRange>,
     pub concerns: Vec<Concern>,
-    pub uncovered_scenarios: Vec<Concern>,
-    pub test_coverage_notes: String,
     pub base_ref: String,
     pub head_ref: String,
     pub pause_prompt: String,
@@ -104,10 +102,6 @@ pub struct SectionProgressUpdate {
     pub unimportant_ranges: Option<Vec<UnimportantRange>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concerns: Option<Vec<Concern>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub uncovered_scenarios: Option<Vec<Concern>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub test_coverage_notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

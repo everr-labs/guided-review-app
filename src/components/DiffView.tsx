@@ -19,6 +19,7 @@ import {
 	pierreSideToFocusSide,
 	type DiffFocusRange,
 } from "@/lib/diffFocus";
+import { computeFileDiffStats, isDeletionOnlyDiff } from "@/lib/diffStats";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
 import {
 	publishedCommentToDiffAnnotation,
@@ -54,11 +55,7 @@ type DiffAnnotationMetadata =
 	| SectionFeedbackAnnotationMetadata;
 
 function reviewSectionHasFeedback(section: ReviewSection): boolean {
-	return (
-		section.concerns.length > 0 ||
-		section.uncovered_scenarios.length > 0 ||
-		section.test_coverage_notes.trim().length > 0
-	);
+	return section.concerns.length > 0;
 }
 
 async function fetchFile(
@@ -396,7 +393,7 @@ export function DiffPane() {
 	const session = useApp((s) => s.session);
 	const currentId = useApp((s) => s.currentSectionId);
 	const sections = useApp((s) => s.sections);
-	const processingSectionId = useApp((s) => s.processingSectionId);
+	const processingSectionIds = useApp((s) => s.processingSectionIds);
 	const diffFocus = useApp((s) => s.diffFocus);
 	const diffFocusError = useApp((s) => s.diffFocusError);
 	const clearDiffFocus = useApp((s) => s.clearDiffFocus);
@@ -413,7 +410,9 @@ export function DiffPane() {
 	const section =
 		current?.kind === "review_section" ? current.section ?? null : null;
 	const currentReviewId = current?.kind === "review_section" ? current.id : null;
-	const sectionIsProcessing = processingSectionId === currentReviewId;
+	const sectionIsProcessing = currentReviewId
+		? processingSectionIds.includes(currentReviewId)
+		: false;
 	const canRequestFeedback = Boolean(
 		session &&
 			current?.kind === "review_section" &&
@@ -426,6 +425,7 @@ export function DiffPane() {
 	const [loadError, setLoadError] = useState<string | null>(null);
 	const [agentFocusLabel, setAgentFocusLabel] = useState<string | null>(null);
 	const [collapsedFiles, setCollapsedFiles] = useState<Record<string, true>>({});
+	const scrollContainerRef = useRef<HTMLElement>(null);
 	const openFiles = useCallback((filePaths: string[]) => {
 		setCollapsedFiles((current) => {
 			let changed = false;
@@ -452,16 +452,16 @@ export function DiffPane() {
 				publishedComments,
 				session.published_comments_error,
 			);
-			await acp.sendMessage(
-				session.session_id,
-				`Walk me through the section "${current.title}" (\`${sectionId}\`).\n\n${publishedCommentContext}\n\nEmit one feedback-only acp-section block for it and stop. Do not include files, ranges, unimportant_ranges, base_ref, or head_ref.`,
-				{
-					origin: "section_feedback_button",
-					sectionId,
-					reason: "load_section_feedback",
-					suppressPreview: true,
-				},
-			);
+			await acp.startSectionTask({
+				parent_session_id: session.session_id,
+				section_id: sectionId,
+				title: current.title,
+				intent: current.intent,
+				files: current.section?.files ?? [],
+				base_ref: session.repo.base_ref,
+				head_ref: session.repo.head_ref,
+				published_comment_context: publishedCommentContext,
+			});
 			recordClientTelemetry("client.diff.feedback_request.sent", {
 				"acp.session_id": session.session_id,
 				"section.id": sectionId,
@@ -551,14 +551,49 @@ export function DiffPane() {
 	}, [sectionId]);
 
 	useEffect(() => {
+		scrollContainerRef.current?.scrollTo({ top: 0 });
+	}, [currentId]);
+
+	useEffect(() => {
 		if (!sectionId) return;
 		if (bundles.length === 0) return;
 		if (autoExpandedSectionsRef.current.has(sectionId)) return;
 		autoExpandedSectionsRef.current.add(sectionId);
+		const deleteOnlyPaths: string[] = [];
+		for (const bundle of bundles) {
+			const stats = computeFileDiffStats(
+				bundle.file_path,
+				bundle.oldText,
+				bundle.newText,
+			);
+			if (isDeletionOnlyDiff(stats)) {
+				deleteOnlyPaths.push(bundle.file_path);
+			}
+		}
+		if (deleteOnlyPaths.length > 0) {
+			const notesSet = new Set(filesWithNotes);
+			const focusedPath =
+				diffFocus && visibleFilePaths.has(diffFocus.file_path)
+					? diffFocus.file_path
+					: null;
+			setCollapsedFiles((current) => {
+				let changed = false;
+				const next = { ...current };
+				for (const path of deleteOnlyPaths) {
+					if (notesSet.has(path)) continue;
+					if (focusedPath === path) continue;
+					if (!next[path]) {
+						next[path] = true;
+						changed = true;
+					}
+				}
+				return changed ? next : current;
+			});
+		}
 		if (filesWithNotes.length > 0) {
 			openFiles(filesWithNotes);
 		}
-	}, [sectionId, bundles, filesWithNotes, openFiles]);
+	}, [sectionId, bundles, filesWithNotes, openFiles, diffFocus, visibleFilePaths]);
 
 	const expandAll = useCallback(
 		() => openFiles(allFilePaths),
@@ -691,7 +726,10 @@ export function DiffPane() {
 
 	if (!session || !current) {
 		return (
-			<section className="flex min-h-0 flex-col items-center justify-center text-sm text-muted-foreground">
+			<section
+				ref={scrollContainerRef}
+				className="flex min-h-0 flex-col items-center justify-center text-sm text-muted-foreground"
+			>
 				<p>Start a session to see the guided review.</p>
 			</section>
 		);
@@ -699,7 +737,10 @@ export function DiffPane() {
 
 	if (current.kind === "pr_description") {
 		return (
-			<section className="flex min-h-0 flex-col overflow-y-auto">
+			<section
+				ref={scrollContainerRef}
+				className="flex min-h-0 flex-col overflow-y-auto"
+			>
 				<header className="border-b border-border bg-card/40 px-6 py-4">
 					<h2 className="text-base font-semibold">{current.title}</h2>
 					<p className="mt-1 text-sm text-muted-foreground">
@@ -732,7 +773,10 @@ export function DiffPane() {
 
 	if (current && !section) {
 		return (
-			<section className="flex min-h-0 flex-col items-center justify-center px-8 text-sm text-muted-foreground">
+			<section
+				ref={scrollContainerRef}
+				className="flex min-h-0 flex-col items-center justify-center px-8 text-sm text-muted-foreground"
+			>
 				<p className="font-medium text-foreground">{current.title}</p>
 				<p className="mt-1">{stripMarkdownForSummary(current.intent)}</p>
 				<p className="mt-3 text-xs">
@@ -753,7 +797,10 @@ export function DiffPane() {
 	}
 
 	return (
-		<section className="flex min-h-0 flex-col overflow-y-auto">
+		<section
+			ref={scrollContainerRef}
+			className="flex min-h-0 flex-col overflow-y-auto"
+		>
 			<header className="border-b border-border bg-card/40 px-6 py-4">
 				<h2 className="text-base font-semibold">{section!.title}</h2>
 				<MarkdownViewer

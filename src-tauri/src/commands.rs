@@ -1,4 +1,4 @@
-use crate::acp_client::{start_session, AcpSessions};
+use crate::acp_client::{spawn_section_task, start_session, AcpSessions};
 use crate::agent_runner::{list_agents, AgentInfo, AgentKind};
 use crate::gh::{check_installation, GhCliStatus};
 use crate::projects::{self, RecentProject};
@@ -6,6 +6,10 @@ use crate::repo::{
     fetch_pull_request_metadata, fetch_pull_request_review_comments, get_changed_ranges, get_diff,
     get_file_at_ref, inspect_origin, parse_pr_url, resolve_source, ClonedRepo, DiffPatch,
     GithubRepoInfo, PublishedPrComment, PullRequestMetadata, SessionSource,
+};
+use crate::review_persistence::{
+    target_from_source, ReviewPersistence, ReviewPersistenceTarget, SaveReviewState,
+    SavedReviewRecord,
 };
 use crate::section::LineRange;
 use crate::telemetry::{self, TelemetryContext};
@@ -29,6 +33,19 @@ pub struct StartSessionResponse {
     pub pull_request_error: Option<String>,
     pub published_comments: Vec<PublishedPrComment>,
     pub published_comments_error: Option<String>,
+    pub saved_review: Option<SavedReviewRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartSectionTaskRequest {
+    pub parent_session_id: String,
+    pub section_id: String,
+    pub title: String,
+    pub intent: String,
+    pub files: Vec<String>,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub published_comment_context: String,
 }
 
 const AGENT_SKILL: &str = include_str!(".././agent-skill.md");
@@ -49,6 +66,62 @@ fn read_agent_skill_from_disk(path: &Path) -> Option<String> {
 fn agent_skill() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("agent-skill.md");
     read_agent_skill_from_disk(&path).unwrap_or_else(|| AGENT_SKILL.to_string())
+}
+
+fn build_section_task_prompt(req: &StartSectionTaskRequest, repo_path: &Path) -> String {
+    let files = if req.files.is_empty() {
+        "- No files were listed for this section. Use the diff between the base and head refs to find the relevant files.".to_string()
+    } else {
+        req.files
+            .iter()
+            .map(|file| format!("- {file}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        r#"You are analysing one section of a code review inside the guided-review desktop app.
+
+The repository is at `{repo_path}`.
+Base ref: {base_ref}
+Head ref: {head_ref}
+
+Section: {section_id} — {title}
+Intent: {intent}
+Files:
+{files}
+
+{published_comment_context}
+
+Read the diff for this section with your built-in tools. Identify only real concerns that follow from the actual code. Use simple language.
+
+If the `guided_review_update_section` tool is available, call it once with:
+{{"section_id":"{section_id}","phase":"started"}}
+
+Emit exactly one final ```acp-section fenced block and no prose outside it.
+The block must be feedback-only and must use this shape:
+
+```acp-section
+{{
+  "section_id": "{section_id}",
+  "concerns": [
+    {{ "text": "...", "severity": "medium", "file_path": "src/...", "line": 24 }}
+  ]
+}}
+```
+
+Do not include `title`, `intent`, `files`, `ranges`, `unimportant_ranges`, `base_ref`, or `head_ref`.
+If there are no actionable concerns, emit `"concerns": []`.
+"#,
+        repo_path = repo_path.display(),
+        base_ref = req.base_ref,
+        head_ref = req.head_ref,
+        section_id = req.section_id,
+        title = req.title,
+        intent = req.intent,
+        files = files,
+        published_comment_context = req.published_comment_context,
+    )
 }
 
 #[tauri::command]
@@ -96,6 +169,7 @@ pub async fn start_session_cmd(
         let (pull_request, pull_request_error) = pull_request_metadata_for_source(&req.source).await;
         let (published_comments, published_comments_error) =
             published_comments_for_source(&req.source).await;
+        let saved_review = saved_review_for_source(&req.source, &cloned.head_sha).await;
 
         let session = start_session(app, req.agent_kind, cloned.path.clone())
             .await
@@ -154,10 +228,36 @@ pub async fn start_session_cmd(
             pull_request_error,
             published_comments,
             published_comments_error,
+            saved_review,
         })
     }
     .instrument(span)
     .await
+}
+
+async fn saved_review_for_source(
+    source: &SessionSource,
+    current_head_sha: &str,
+) -> Option<SavedReviewRecord> {
+    let target = target_from_source(source)?;
+    let store = match ReviewPersistence::open_default().await {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!(error = %e, "review persistence unavailable");
+            return None;
+        }
+    };
+    match store.load(&target).await {
+        Ok(Some(mut record)) => {
+            record.is_stale = record.is_stale_for(current_head_sha);
+            Some(record)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "saved review unavailable");
+            None
+        }
+    }
 }
 
 async fn published_comments_for_source(
@@ -278,6 +378,38 @@ pub async fn record_recent_project_cmd(
 }
 
 #[tauri::command]
+pub async fn save_review_state_cmd(
+    req: SaveReviewState,
+    telemetry_context: Option<TelemetryContext>,
+) -> Result<SavedReviewRecord, String> {
+    let span = command_span("save_review_state_cmd", telemetry_context.as_ref());
+    async move {
+        let store = ReviewPersistence::open_default()
+            .await
+            .map_err(|e| e.to_string())?;
+        store.save(req).await.map_err(|e| e.to_string())
+    }
+    .instrument(span)
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_saved_review_cmd(
+    target: ReviewPersistenceTarget,
+    telemetry_context: Option<TelemetryContext>,
+) -> Result<(), String> {
+    let span = command_span("delete_saved_review_cmd", telemetry_context.as_ref());
+    async move {
+        let store = ReviewPersistence::open_default()
+            .await
+            .map_err(|e| e.to_string())?;
+        store.delete(&target).await.map_err(|e| e.to_string())
+    }
+    .instrument(span)
+    .await
+}
+
+#[tauri::command]
 pub async fn send_message_cmd(
     sessions: State<'_, AcpSessions>,
     session_id: String,
@@ -305,6 +437,45 @@ pub async fn send_message_cmd(
         );
         sess.send_prompt(text, origin, reason, section_id)
             .map_err(|e| e.to_string())
+    }
+    .instrument(span)
+    .await
+}
+
+#[tauri::command]
+pub async fn start_section_task_cmd(
+    app: AppHandle,
+    sessions: State<'_, AcpSessions>,
+    req: StartSectionTaskRequest,
+    telemetry_context: Option<TelemetryContext>,
+) -> Result<(), String> {
+    let span = tracing::info_span!(
+        "section_task.start",
+        parent_session_id = %req.parent_session_id,
+        section_id = %req.section_id,
+    );
+    telemetry::set_span_parent(&span, telemetry_context.as_ref());
+    async move {
+        let parent = sessions
+            .get(&req.parent_session_id)
+            .await
+            .ok_or_else(|| "unknown session".to_string())?;
+        let prompt = build_section_task_prompt(&req, &parent.cwd);
+        tracing::info!(
+            agent = ?parent.agent_kind,
+            repo = %parent.cwd.display(),
+            file_count = req.files.len(),
+            "spawning background section task",
+        );
+        spawn_section_task(
+            app,
+            parent.agent_kind,
+            parent.cwd.clone(),
+            req.parent_session_id,
+            prompt,
+            req.section_id,
+        );
+        Ok(())
     }
     .instrument(span)
     .await
@@ -428,5 +599,39 @@ mod tests {
 
         fs::remove_file(&path).expect("remove test skill");
         assert_eq!(skill.as_deref(), Some("fresh skill from disk"));
+    }
+
+    #[test]
+    fn embedded_agent_skill_shows_acp_section_fence_with_json_body() {
+        assert!(
+            AGENT_SKILL.contains("```acp-section\n{\n  \"section_id\": \"api-changes\""),
+            "agent skill should show the exact acp-section fence tag with a JSON body"
+        );
+    }
+
+    #[test]
+    fn section_task_prompt_is_standalone_and_feedback_only() {
+        let req = StartSectionTaskRequest {
+            parent_session_id: "parent-session".to_string(),
+            section_id: "metadata-retention".to_string(),
+            title: "Metadata retention".to_string(),
+            intent: "Check how saved metadata is preserved.".to_string(),
+            files: vec!["src/lib/store.ts".to_string(), "src/App.tsx".to_string()],
+            base_ref: "origin/main".to_string(),
+            head_ref: "feature".to_string(),
+            published_comment_context: "Existing published comments:\n- Already covered."
+                .to_string(),
+        };
+
+        let prompt = build_section_task_prompt(&req, Path::new("/tmp/repo"));
+
+        assert!(prompt.contains("repository is at `/tmp/repo`"));
+        assert!(prompt.contains("Section: metadata-retention — Metadata retention"));
+        assert!(prompt.contains("Files:\n- src/lib/store.ts\n- src/App.tsx"));
+        assert!(prompt.contains("Base ref: origin/main"));
+        assert!(prompt.contains("Head ref: feature"));
+        assert!(prompt.contains("Existing published comments:\n- Already covered."));
+        assert!(prompt.contains("Emit exactly one final ```acp-section fenced block"));
+        assert!(prompt.contains("Do not include `title`, `intent`, `files`, `ranges`, `unimportant_ranges`, `base_ref`, or `head_ref`"));
     }
 }

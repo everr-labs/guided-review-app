@@ -50,8 +50,6 @@ test("parseReviewSectionPayload accepts feedback-only sections", () => {
 				line: 148,
 			},
 		],
-		uncovered_scenarios: [],
-		test_coverage_notes: "Missing empty input coverage.",
 		pause_prompt: "Want to leave a comment?",
 	});
 
@@ -67,7 +65,6 @@ test("parseReviewSectionPayload accepts feedback-only sections", () => {
 			line: 148,
 		},
 	]);
-	assert.equal(section?.test_coverage_notes, "Missing empty input coverage.");
 	assert.equal(section?.pause_prompt, "Want to leave a comment?");
 });
 
@@ -87,8 +84,6 @@ test("parseReviewSectionPayload accepts unimportant ranges with reasons", () => 
 			},
 		],
 		concerns: [],
-		uncovered_scenarios: [],
-		test_coverage_notes: "",
 		base_ref: "base",
 		head_ref: "head",
 	});
@@ -161,8 +156,6 @@ test("parseReviewSectionPayload keeps malformed unimportant ranges out", () => {
 			},
 		],
 		concerns: [],
-		uncovered_scenarios: [],
-		test_coverage_notes: "",
 		base_ref: "base",
 		head_ref: "head",
 	});

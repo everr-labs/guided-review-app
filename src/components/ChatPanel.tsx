@@ -12,6 +12,7 @@ import {
 	LoaderCircle,
 	Map,
 	Maximize2,
+	Wrench,
 	X,
 } from "lucide-react";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
@@ -24,7 +25,12 @@ import {
 	formatDiffReferenceLabel,
 } from "@/lib/diffFocus";
 import {
-	assistantPartsToMarkdown,
+	buildUserMessageWithReviewContext,
+	createReviewSnapshot,
+} from "@/lib/reviewPersistence";
+import {
+	type AssistantBlock,
+	assistantPartsToBlocks,
 	stripMarkdownForSummary,
 } from "@/lib/markdownContent";
 import { MarkdownViewer } from "./MarkdownViewer";
@@ -98,10 +104,7 @@ function ChatItemView({ item }: { item: ChatItem }) {
 
 	if (item.type === "review_section") {
 		const { section } = item;
-		const hasFeedback =
-			section.concerns.length > 0 ||
-			section.uncovered_scenarios.length > 0 ||
-			!!section.test_coverage_notes;
+		const hasFeedback = section.concerns.length > 0;
 		return (
 			<div className="rounded-md border border-border bg-card px-3 py-2 text-sm">
 				<div className="mb-2 flex items-center gap-2 font-semibold">
@@ -131,23 +134,11 @@ function ChatItemView({ item }: { item: ChatItem }) {
 				)}
 				{hasFeedback ? (
 					<div className="space-y-3">
-						{section.test_coverage_notes && (
-							<div className="text-xs">
-								<div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-									Test coverage
-								</div>
-								{section.test_coverage_notes}
-							</div>
-						)}
 						<FeedbackList title="Concerns" concerns={section.concerns} />
-						<FeedbackList
-							title="Uncovered scenarios"
-							concerns={section.uncovered_scenarios}
-						/>
 					</div>
 				) : (
 					<div className="text-xs text-muted-foreground">
-						No feedback called out for this section.
+						No concerns found for this section.
 					</div>
 				)}
 			</div>
@@ -162,20 +153,53 @@ function partsFromMessage(message: ChatMessage): ChatMessagePart[] {
 	return message.text ? [{ type: "markdown", text: message.text }] : [];
 }
 
-interface FullPageResponse {
-	markdown: string;
-	toolCalls: ToolCallItem[];
+function ToolCallCard({ toolCall }: { toolCall: ToolCallItem }) {
+	return (
+		<div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-2.5 py-1.5 text-xs text-muted-foreground">
+			<Wrench className="size-3.5 shrink-0" />
+			<span className="min-w-0 flex-1 truncate font-medium text-foreground">
+				{toolCall.title}
+			</span>
+			<span className="rounded bg-background/70 px-1.5 py-0.5 font-mono text-[10px]">
+				{toolCall.status}
+			</span>
+		</div>
+	);
+}
+
+function AssistantBlocks({
+	blocks,
+	className,
+}: {
+	blocks: AssistantBlock[];
+	className?: string;
+}) {
+	return (
+		<div className={cn("space-y-2", className)}>
+			{blocks.map((block, index) =>
+				block.type === "markdown" ? (
+					<MarkdownViewer key={index} markdown={block.markdown} />
+				) : (
+					<ToolCallCard
+						key={`${block.toolCall.tool_call_id}-${index}`}
+						toolCall={block.toolCall}
+					/>
+				),
+			)}
+		</div>
+	);
 }
 
 function AssistantResponseView({
 	message,
+	blocks,
 	onOpenFullPage,
 }: {
 	message: ChatMessage;
-	onOpenFullPage: (response: FullPageResponse) => void;
+	blocks: AssistantBlock[];
+	onOpenFullPage: (blocks: AssistantBlock[]) => void;
 }) {
-	const response = assistantPartsToMarkdown(partsFromMessage(message));
-	const canOpenFullPage = response.markdown.trim().length > 0;
+	const canOpenFullPage = blocks.length > 0;
 
 	return (
 		<div className="relative rounded-md border border-border bg-card px-3 py-2 text-foreground">
@@ -185,16 +209,15 @@ function AssistantResponseView({
 					variant="ghost"
 					size="icon"
 					className="absolute right-1.5 top-1.5 h-7 w-7 text-muted-foreground hover:text-foreground"
-					onClick={() => onOpenFullPage(response)}
+					onClick={() => onOpenFullPage(blocks)}
 					title="Open response"
 					aria-label="Open response"
 				>
 					<Maximize2 className="size-3.5" />
 				</Button>
 			)}
-			<MarkdownViewer
-				markdown={response.markdown}
-				toolCalls={response.toolCalls}
+			<AssistantBlocks
+				blocks={blocks}
 				className={canOpenFullPage ? "pr-7" : undefined}
 			/>
 			{message.streaming && (
@@ -210,7 +233,10 @@ export function ChatPanel() {
 	const drafts = useApp((s) => s.commentDrafts);
 	const streaming = useApp((s) => s.streaming);
 	const sections = useApp((s) => s.sections);
-	const processingSectionId = useApp((s) => s.processingSectionId);
+	const currentSectionId = useApp((s) => s.currentSectionId);
+	const processingSectionIds = useApp((s) => s.processingSectionIds);
+	const publishedComments = useApp((s) => s.publishedComments);
+	const publishedCommentsError = useApp((s) => s.publishedCommentsError);
 	const addUserMessage = useApp((s) => s.addUserMessage);
 	const pushError = useApp((s) => s.pushError);
 	const pendingDiffReferences = useApp((s) => s.pendingDiffReferences);
@@ -224,12 +250,13 @@ export function ChatPanel() {
 
 	const [input, setInput] = useState("");
 	const [publishingComments, setPublishingComments] = useState(false);
-	const [fullPageResponse, setFullPageResponse] =
-		useState<FullPageResponse | null>(null);
+	const [fullPageBlocks, setFullPageBlocks] = useState<AssistantBlock[] | null>(
+		null,
+	);
 	const scrollerRef = useRef<HTMLDivElement>(null);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
-	const processingSection = processingSectionId
-		? sections.find((s) => s.id === processingSectionId)
+	const processingSection = processingSectionIds[0]
+		? sections.find((s) => s.id === processingSectionIds[0])
 		: null;
 
 	useEffect(() => {
@@ -248,6 +275,19 @@ export function ChatPanel() {
 			.map((r) => formatDiffReferenceForMessage(r))
 			.join("\n");
 		const body = refs ? (text ? `${refs}\n\n${text}` : refs) : text;
+		const snapshot = createReviewSnapshot({
+			current_section_id: currentSectionId,
+			sections,
+			chat,
+			comment_drafts: drafts,
+			published_comments: publishedComments,
+			published_comments_error: publishedCommentsError,
+		});
+		const messageToAgent = buildUserMessageWithReviewContext({
+			userText: body,
+			session,
+			snapshot,
+		});
 		recordClientTelemetry("client.chat.send.requested", {
 			"acp.session_id": session.session_id,
 			"message.length": body.length,
@@ -257,9 +297,10 @@ export function ChatPanel() {
 		addUserMessage(body);
 		clearPendingDiffReferences();
 		try {
-			await acp.sendMessage(session.session_id, body, {
+			await acp.sendMessage(session.session_id, messageToAgent, {
 				origin: "chat_panel_user_send",
 				reason: "user_reply",
+				suppressPreview: true,
 			});
 			recordClientTelemetry("client.chat.send.succeeded", {
 				"acp.session_id": session.session_id,
@@ -325,9 +366,9 @@ export function ChatPanel() {
 	return (
 		<aside className="flex min-h-0 min-w-0 flex-col border-l border-border bg-card/30">
 			<Dialog
-				open={!!fullPageResponse}
+				open={!!fullPageBlocks}
 				onOpenChange={(open) => {
-					if (!open) setFullPageResponse(null);
+					if (!open) setFullPageBlocks(null);
 				}}
 			>
 				<DialogContent className="grid h-[calc(100vh-2rem)] max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-none grid-rows-[auto_1fr] gap-0 p-0">
@@ -338,10 +379,9 @@ export function ChatPanel() {
 						</DialogDescription>
 					</DialogHeader>
 					<div className="min-h-0 overflow-y-auto px-6 py-5">
-						{fullPageResponse && (
-							<MarkdownViewer
-								markdown={fullPageResponse.markdown}
-								toolCalls={fullPageResponse.toolCalls}
+						{fullPageBlocks && (
+							<AssistantBlocks
+								blocks={fullPageBlocks}
 								className="mx-auto max-w-4xl text-base"
 							/>
 						)}
@@ -356,22 +396,23 @@ export function ChatPanel() {
 				className="flex-1 space-y-3 overflow-y-auto px-4 py-4"
 			>
 				{chat.map((m) => {
-					if (!m.item && !m.text && !m.streaming && !m.parts?.length) {
-						return null;
-					}
-					return (
-						<div key={m.id} className="space-y-1">
-							<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-								{m.role}
-							</div>
-							{m.item ? (
+					if (m.item) {
+						return (
+							<div key={m.id} className="space-y-1">
+								<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+									{m.role}
+								</div>
 								<ChatItemView item={m.item} />
-							) : m.role === "assistant" ? (
-								<AssistantResponseView
-									message={m}
-									onOpenFullPage={setFullPageResponse}
-								/>
-							) : (
+							</div>
+						);
+					}
+					if (m.role === "user") {
+						if (!m.text.trim()) return null;
+						return (
+							<div key={m.id} className="space-y-1">
+								<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+									{m.role}
+								</div>
 								<div
 									className={cn(
 										"whitespace-pre-wrap break-words rounded-md px-3 py-2 text-sm leading-relaxed",
@@ -383,7 +424,21 @@ export function ChatPanel() {
 										<span className="ml-0.5 animate-pulse">▋</span>
 									)}
 								</div>
-							)}
+							</div>
+						);
+					}
+					const blocks = assistantPartsToBlocks(partsFromMessage(m));
+					if (blocks.length === 0 && !m.streaming) return null;
+					return (
+						<div key={m.id} className="space-y-1">
+							<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+								{m.role}
+							</div>
+							<AssistantResponseView
+								message={m}
+								blocks={blocks}
+								onOpenFullPage={setFullPageBlocks}
+							/>
 						</div>
 					);
 				})}
@@ -417,13 +472,13 @@ export function ChatPanel() {
 				)}
 			</div>
 			<div className="space-y-2 border-t border-border bg-background/40 p-3">
-				{processingSectionId && (
+				{processingSectionIds.length > 0 && (
 					<div className="flex items-center gap-2 rounded-md border border-primary/30 bg-primary/10 px-3 py-2 text-xs font-medium text-primary">
 						<LoaderCircle className="size-3.5 animate-spin" />
 						<span>
-							Agent is processing{" "}
-							{processingSection ? `“${processingSection.title}”` : "this section"}
-							…
+							{processingSectionIds.length === 1
+								? `Agent is processing ${processingSection ? `“${processingSection.title}”` : "this section"}…`
+								: `Agent is processing ${processingSectionIds.length} sections…`}
 						</span>
 					</div>
 				)}

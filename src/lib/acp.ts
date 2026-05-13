@@ -16,6 +16,11 @@ import {
 	withTelemetryContext,
 } from "./telemetry";
 import { sendMessageTelemetryAttrs } from "./commentPublish";
+import type {
+	ReviewPersistenceTarget,
+	SavedReviewRecord,
+	SaveReviewStateRequest,
+} from "./reviewPersistence";
 
 export type AgentKind = "claude_code" | "codex";
 
@@ -77,6 +82,18 @@ export interface StartSessionResponse {
 	pull_request_error?: string;
 	published_comments: PublishedPrComment[];
 	published_comments_error?: string;
+	saved_review?: SavedReviewRecord;
+}
+
+export interface StartSectionTaskRequest {
+	parent_session_id: string;
+	section_id: string;
+	title: string;
+	intent: string;
+	files: string[];
+	base_ref: string;
+	head_ref: string;
+	published_comment_context: string;
 }
 
 export interface DiffPatch {
@@ -119,12 +136,14 @@ export type RecentProject =
 export interface SectionMapEvent {
 	session_id: string;
 	map: SectionMap;
+	suppress_chat?: boolean;
 	telemetry_context?: TelemetryContext;
 }
 
 export interface SectionEvent {
 	session_id: string;
 	section: ReviewSection;
+	suppress_chat?: boolean;
 	telemetry_context?: TelemetryContext;
 }
 
@@ -335,6 +354,10 @@ export const acp = {
 		invokeWithTelemetry<LocalRepoOrigin>("inspect_local_repo_origin_cmd", {
 			path,
 		}),
+	saveReviewState: (req: SaveReviewStateRequest) =>
+		invokeWithTelemetry<SavedReviewRecord>("save_review_state_cmd", { req }),
+	deleteSavedReview: (target: ReviewPersistenceTarget) =>
+		invokeWithTelemetry<void>("delete_saved_review_cmd", { target }),
 	sendMessage: async (
 		session_id: string,
 		text: string,
@@ -371,6 +394,34 @@ export const acp = {
 				"message.reason": options.reason,
 				"section.id": options.sectionId,
 				"message.length": text.length,
+			});
+			throw e;
+		}
+	},
+	startSectionTask: async (req: StartSectionTaskRequest) => {
+		recordClientTelemetry("client.acp.section_task.requested", {
+			"acp.session_id": req.parent_session_id,
+			"section.id": req.section_id,
+			"section.file_count": req.files.length,
+		});
+		try {
+			await invokeWithTelemetry<void>(
+				"start_section_task_cmd",
+				{ req },
+				{
+					"acp.session_id": req.parent_session_id,
+					"section.id": req.section_id,
+					"section.file_count": req.files.length,
+				},
+			);
+			recordClientTelemetry("client.acp.section_task.succeeded", {
+				"acp.session_id": req.parent_session_id,
+				"section.id": req.section_id,
+			});
+		} catch (e) {
+			recordClientTelemetryError("client.acp.section_task.failed", e, {
+				"acp.session_id": req.parent_session_id,
+				"section.id": req.section_id,
 			});
 			throw e;
 		}

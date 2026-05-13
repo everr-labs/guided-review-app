@@ -1,19 +1,9 @@
 import type { ChatMessagePart, ToolCallItem } from "./types/section";
+import { cleanVisibleStructuredText } from "./store";
 
-const TOOL_CALL_LINK_PREFIX = "#gr-tool-call-";
-
-function escapeMarkdownLinkText(text: string): string {
-	return text.replace(/([\\[\]])/g, "\\$1");
-}
-
-export function toolCallHref(id: string): string {
-	return `${TOOL_CALL_LINK_PREFIX}${encodeURIComponent(id)}`;
-}
-
-export function toolCallIdFromHref(href: string | undefined): string | null {
-	if (!href?.startsWith(TOOL_CALL_LINK_PREFIX)) return null;
-	return decodeURIComponent(href.slice(TOOL_CALL_LINK_PREFIX.length));
-}
+export type AssistantBlock =
+	| { type: "markdown"; markdown: string }
+	| { type: "tool_call"; toolCall: ToolCallItem };
 
 export function stripMarkdownForSummary(markdown: string): string {
 	return markdown
@@ -32,25 +22,29 @@ export function stripMarkdownForSummary(markdown: string): string {
 		.trim();
 }
 
-export function assistantPartsToMarkdown(parts: ChatMessagePart[]): {
-	markdown: string;
-	toolCalls: ToolCallItem[];
-} {
-	let markdown = "";
-	const toolCalls: ToolCallItem[] = [];
+export function assistantPartsToBlocks(
+	parts: ChatMessagePart[],
+): AssistantBlock[] {
+	const blocks: AssistantBlock[] = [];
+	let buffer = "";
+
+	const flushMarkdown = () => {
+		if (!buffer) return;
+		const cleaned = cleanVisibleStructuredText(buffer).trim();
+		buffer = "";
+		if (!cleaned) return;
+		blocks.push({ type: "markdown", markdown: cleaned });
+	};
 
 	for (const part of parts) {
 		if (part.type === "markdown") {
-			markdown += part.text;
+			buffer += part.text;
 			continue;
 		}
-
-		toolCalls.push(part.toolCall);
-		const leadingSpace = markdown && !/\s$/.test(markdown) ? " " : "";
-		markdown += `${leadingSpace}[${escapeMarkdownLinkText(
-			part.toolCall.title,
-		)}](${toolCallHref(part.toolCall.tool_call_id)})`;
+		flushMarkdown();
+		blocks.push({ type: "tool_call", toolCall: part.toolCall });
 	}
+	flushMarkdown();
 
-	return { markdown, toolCalls };
+	return blocks;
 }

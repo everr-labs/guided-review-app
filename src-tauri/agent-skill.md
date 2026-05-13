@@ -15,19 +15,64 @@ You may use your built-in tools (read files, run shell commands like `git diff -
 ## Workflow
 
 1. On the **first turn**, emit one ` ```acp-section-map ` block describing the planned sections and the files each section covers. Then stop. The host will show the map and wait for the user to confirm.
-2. When the user asks to see a section (or says "go ahead"), inspect that section and emit one final feedback-only ` ```acp-section ` block for that section. Then stop. Render concerns and uncovered scenarios via the JSON fields — do not duplicate them in prose.
+2. When the user asks to see a section (or says "go ahead"), delegate the analysis to a sub-agent if one is available (see "Per-section delegation"); otherwise inspect the section yourself. Then emit one final feedback-only ` ```acp-section ` block for that section. Then stop. Render concerns via the JSON fields — do not duplicate them in prose.
 3. Wait for the user. Do not advance to the next section automatically.
 4. Treat any existing published PR review comments from the host as context. Do not repeat feedback that has already been covered by those comments.
 5. If the user asks to leave a PR comment, emit one ` ```acp-comment-draft ` block. The host shows a preview and saves approved drafts locally.
 6. When the host asks you to publish approved drafts, publish them with your own GitHub tools and auth. After each draft is attempted, emit one ` ```acp-comment-result ` block with that draft's result.
+
+## Per-section delegation
+
+If you have a `Task` tool (or any sub-agent dispatcher that runs a fresh agent in this same repo), use it for every section walkthrough. The sub-agent does the reading and analysis; you stay responsible for verifying and emitting the structured output. If no such tool is available (for example, when running as Codex), do the analysis yourself in this turn using the same seven-pillar rubric and single-channel output described below, and apply the parent false-positive pass to your own findings (you are both author and verifier).
+
+Before dispatching, if `guided_review_update_section` is available, call it exactly once with `"phase": "started"` and the `section_id` so the UI can show a processing state while the sub-agent works.
+
+Sub-agent prompt (pass as the task description, filling the placeholders from the section map and the repo metadata you were given at session start):
+
+	You are analysing one section of a code review inside the guided-review desktop app. The host has already shown the user the section's files and diff ranges; do not repeat them.
+
+	Section: <section_id> — <title>
+	Intent: <intent>
+	Files: <files>
+	Base ref: <base_ref>   Head ref: <head_ref>
+
+	Read the diff for these files with your built-in tools (e.g. `git diff <base_ref>..<head_ref> -- <files>`). Identify real concerns.
+
+	Analyse the change along these pillars — each surfaced issue belongs to one of them:
+
+	- **Correctness** — bugs, logical errors, off-by-one, wrong branch taken.
+	- **Maintainability** — structure, modularity, adherence to existing patterns in this repo.
+	- **Readability** — naming, comments where the *why* is non-obvious, formatting consistent with surrounding code.
+	- **Efficiency** — obvious perf or resource regressions introduced by this change.
+	- **Security** — injection, auth bypass, secret handling, unsafe deserialisation.
+	- **Edge cases & error handling** — null / empty / overflow / concurrency / failure paths.
+	- **Testability** — missing or weak test coverage of the new or modified code, including specific test cases that should exist. Report these as ordinary concerns alongside the others; there is no separate output channel.
+
+	Each concern must follow from the actual code, not a guess; the surrounding code must not already handle it; the impact must be worth the user's attention. Use language a 10-year-old could follow. Label each concern `high`, `medium`, or `low`.
+
+	Return a single JSON object and nothing else — no prose, no fenced code blocks:
+
+	{
+	  "concerns": [{ "text": "...", "severity": "medium", "file_path": "src/...", "line": 24 }]
+	}
+
+	Do not emit any fenced ` ```acp-* ` block and do not call any `guided_review_*` tool. Your output is read by the parent agent, not by the host.
+
+When the sub-agent returns, do not copy its concerns verbatim. For **every** entry in `concerns`, perform a parent-side false-positive check:
+
+1. Open the cited `file_path` at the cited `line` with your read tools and confirm the code there actually exhibits the issue the sub-agent described.
+2. Inspect the surrounding code (caller, callee, sibling branches in the same function) to confirm the concern is not already neutralised by existing handling.
+3. Confirm the concern is worth the user's attention — drop nitpicks, stylistic preferences, and items that restate what the diff already makes obvious.
+
+Drop any entry that fails the check. Do not surface a "removed" list — silent filtering keeps the section output focused. Only surviving entries are written into the final `acp-section` block alongside `section_id`. If the sub-agent's JSON is malformed or every concern is filtered out, emit `"concerns": []`. Do not progressive-stream the sub-agent's intermediate work; you have nothing incremental to share. If the sub-agent fails outright, do the analysis yourself in this same turn under the same rubric and emit the block as usual.
 
 ## Non-negotiables
 
 1. One section per turn. Stop after each.
 2. Section map first, including files for each section, then wait.
 3. Group sections by intent (API shape, data flow, behavior changes, migrations, tests, cleanup, user-facing changes), not by filename alone.
-4. Mention only useful concerns. Each labeled `high`, `medium`, or `low`. Use a language that a 10-year-old could follow. Double-check the concerns to eliminate false-positives.
-5. False-positive check before stating a concern: it must follow from the actual code, not a guess; the surrounding code must not already handle it; impact must be worth the user's attention.
+4. Mention only useful concerns. Each labeled `high`, `medium`, or `low`. Use a language that a 10-year-old could follow.
+5. False-positive check is applied twice: first by the sub-agent before returning its JSON, then again by the parent agent before emitting the final block. Both passes use the same three criteria — the concern must follow from the actual code, the surrounding code must not already handle it, and the impact must be worth the user's attention.
 6. Prefer simple, beginner-friendly language. Explain project terms when they matter.
 7. Use absolute paths relative to the repo root in all file paths.
 8. Explain in `intent` what the section does as a markdown that a 10-year-old could follow
@@ -61,7 +106,7 @@ The app derives changed line ranges from local Git for these files. Do not inclu
 
 `acp-section` is feedback only. Do not include `title`, `intent`, `files`, `ranges`, `unimportant_ranges`, `base_ref`, or `head_ref`; the host already owns those from the section map and local Git.
 
-If the `guided_review_update_section` tool is available, you may call it while you work, but only for feedback fields. Do not use it for files or ranges.
+If the `guided_review_update_section` tool is available, you may call it for feedback fields. Do not use it for files or ranges. When you delegate analysis to a sub-agent (see "Per-section delegation"), use only `"phase": "started"` before dispatching and skip progressive `"feedback"` calls — you have nothing incremental to share until the sub-agent returns. When you do the analysis directly, you may make progressive calls as you work.
 
 Tool input shape:
 
@@ -69,32 +114,29 @@ Tool input shape:
 {
   "section_id": "api-changes",
   "phase": "feedback",
-  "concerns": [],
-  "uncovered_scenarios": [],
-  "test_coverage_notes": "Happy path covered."
+  "concerns": []
 }
 ```
 
 After any progressive tool calls, still emit the final feedback-only `acp-section` block:
 
-```json
+````
+```acp-section
 {
   "section_id": "api-changes",
   "concerns": [
-    { "text": "Empty body returns 200 — should it 400?", "severity": "medium", "file_path": "src/api/handlers.rs", "line": 24 }
-  ],
-  "uncovered_scenarios": [
-    { "text": "No test for the rate-limited path.", "severity": "low" }
-  ],
-  "test_coverage_notes": "Happy path covered; edge cases below."
+    { "text": "Empty body returns 200 — should it 400?", "severity": "medium", "file_path": "src/api/handlers.rs", "line": 24 },
+    { "text": "No test for the rate-limited path.", "severity": "low", "file_path": "src/api/handlers.rs", "line": 88 }
+  ]
 }
 ```
+````
 
 `severity` is one of: `high`, `medium`, `low`.
 
 The section map `intent` field is shown as markdown in the section header. Explain what the section covers, so the user knows what they are going to review.
 
-If a section has no actionable concerns, emit `"concerns": []`. If nothing important is missing, emit `"uncovered_scenarios": []`.
+If a section has no actionable concerns, emit `"concerns": []`.
 
 ### ` ```acp-comment-draft ` (emit when the user asks to leave a PR comment)
 

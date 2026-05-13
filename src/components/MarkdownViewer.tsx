@@ -1,45 +1,18 @@
 import { useMemo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Wrench } from "lucide-react";
-import { toolCallIdFromHref } from "@/lib/markdownContent";
-import type { ToolCallItem } from "@/lib/types/section";
 import { cn } from "@/lib/utils";
-
-function ToolCallChip({ toolCall }: { toolCall: ToolCallItem }) {
-	return (
-		<span className="mx-0.5 inline-flex max-w-full items-center gap-1 rounded border border-border bg-muted/50 px-1.5 py-0.5 align-baseline text-[11px] font-medium leading-none text-muted-foreground">
-			<Wrench className="size-3 shrink-0" />
-			<span className="truncate">{toolCall.title}</span>
-			<span className="rounded bg-background/70 px-1 font-mono text-[10px]">
-				{toolCall.status}
-			</span>
-		</span>
-	);
-}
 
 export function MarkdownViewer({
 	markdown,
-	toolCalls = [],
 	className,
 }: {
 	markdown: string;
-	toolCalls?: ToolCallItem[];
 	className?: string;
 }) {
-	const toolCallById = useMemo(
-		() => new Map(toolCalls.map((toolCall) => [toolCall.tool_call_id, toolCall])),
-		[toolCalls],
-	);
-
 	const components = useMemo<Components>(
 		() => ({
 			a: ({ href, children, ...props }) => {
-				const toolCallId = toolCallIdFromHref(href);
-				if (toolCallId) {
-					const toolCall = toolCallById.get(toolCallId);
-					return toolCall ? <ToolCallChip toolCall={toolCall} /> : null;
-				}
 				return (
 					<a
 						href={href}
@@ -148,7 +121,7 @@ export function MarkdownViewer({
 				/>
 			),
 		}),
-		[toolCallById],
+		[],
 	);
 
 	return (
