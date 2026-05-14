@@ -7,18 +7,18 @@ import {
 	LocateFixed,
 	MessageSquare,
 	Sparkles,
+	Tag,
 } from "lucide-react";
 import { useApp } from "@/lib/store";
 import { acp } from "@/lib/acp";
 import { SeverityBadge } from "./SeverityBadge";
 import type { UnimportantRange } from "@/lib/types/section";
 import {
-	createDiffFocusRange,
 	focusSideToPierreSide,
 	formatDiffFocusHeader,
-	pierreSideToFocusSide,
 	type DiffFocusRange,
 } from "@/lib/diffFocus";
+import { resolveDiffSelectionRange } from "@/lib/diffSelection";
 import { computeFileDiffStats, isDeletionOnlyDiff } from "@/lib/diffStats";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
 import {
@@ -74,22 +74,6 @@ async function fetchFile(
 	const text = content ?? "";
 	fileCache.set(key, text);
 	return text;
-}
-
-function pierreRangeToFocus(
-	range: SelectedLineRange,
-	filePath: string,
-): DiffFocusRange | null {
-	const endSide = range.endSide ?? range.side;
-	if (!endSide) return null;
-	return createDiffFocusRange({
-		file_path: filePath,
-		start_line: range.start,
-		end_line: range.end,
-		side: pierreSideToFocusSide(endSide),
-		source: "user",
-		mode: "draft-reference",
-	});
 }
 
 function focusRangeToPierreSelection(
@@ -259,21 +243,56 @@ function DiffFileCard({
 		);
 	}, []);
 
-	const onLineSelected = useCallback(
-		(range: SelectedLineRange | null) => {
+	const hostRef = useRef<HTMLDivElement>(null);
+	const [contextMenu, setContextMenu] = useState<{
+		x: number;
+		y: number;
+		range: DiffFocusRange;
+	} | null>(null);
+
+	const closeContextMenu = useCallback(() => setContextMenu(null), []);
+
+	const onContextMenu = useCallback(
+		(event: React.MouseEvent<HTMLDivElement>) => {
+			const host = hostRef.current?.querySelector("diffs-container");
+			if (!(host instanceof HTMLElement)) return;
+			const range = resolveDiffSelectionRange(host, bundle.file_path);
 			if (!range) return;
-			const next = pierreRangeToFocus(range, bundle.file_path);
-			if (!next) return;
-			recordClientTelemetry("client.diff.focus.selected", {
-				"file.path": next.file_path,
-				"line.start": next.start_line,
-				"line.end": next.end_line,
-				"line.side": next.side,
-			});
-			useApp.getState().addPendingDiffReference(next);
+			event.preventDefault();
+			setContextMenu({ x: event.clientX, y: event.clientY, range });
 		},
 		[bundle.file_path],
 	);
+
+	const onTagSelection = useCallback(() => {
+		if (!contextMenu) return;
+		recordClientTelemetry("client.diff.focus.selected", {
+			"file.path": contextMenu.range.file_path,
+			"line.start": contextMenu.range.start_line,
+			"line.end": contextMenu.range.end_line,
+			"line.side": contextMenu.range.side,
+		});
+		useApp.getState().addPendingDiffReference(contextMenu.range);
+		closeContextMenu();
+	}, [contextMenu, closeContextMenu]);
+
+	useEffect(() => {
+		if (!contextMenu) return;
+		const onDocMouseDown = (event: MouseEvent) => {
+			const menu = document.querySelector("[data-diff-context-menu]");
+			if (menu && menu.contains(event.target as Node)) return;
+			closeContextMenu();
+		};
+		const onKey = (event: KeyboardEvent) => {
+			if (event.key === "Escape") closeContextMenu();
+		};
+		window.addEventListener("mousedown", onDocMouseDown);
+		window.addEventListener("keydown", onKey);
+		return () => {
+			window.removeEventListener("mousedown", onDocMouseDown);
+			window.removeEventListener("keydown", onKey);
+		};
+	}, [contextMenu, closeContextMenu]);
 
 	const renderAnnotation = useCallback(
 		(annotation: DiffLineAnnotation<DiffAnnotationMetadata>) => {
@@ -361,18 +380,19 @@ function DiffFileCard({
 		() => ({
 			theme: "pierre-dark" as const,
 			diffStyle: "unified" as const,
-			enableLineSelection: true,
+			enableLineSelection: false,
 			collapsed,
-			onLineSelected,
 			onPostRender,
 		}),
-		[collapsed, onLineSelected, onPostRender],
+		[collapsed, onPostRender],
 	);
 
 	return (
 		<div
+			ref={hostRef}
 			data-file-path={bundle.file_path}
 			data-expanded={collapsed ? "false" : "true"}
+			onContextMenu={onContextMenu}
 			className="relative overflow-hidden rounded-md border border-border bg-card"
 		>
 			<MultiFileDiff
@@ -385,6 +405,52 @@ function DiffFileCard({
 				renderHeaderPrefix={renderHeaderPrefix}
 				renderHeaderMetadata={renderHeaderMetadata}
 			/>
+			{contextMenu && (
+				<DiffContextMenu
+					x={contextMenu.x}
+					y={contextMenu.y}
+					range={contextMenu.range}
+					onTag={onTagSelection}
+				/>
+			)}
+		</div>
+	);
+}
+
+function DiffContextMenu({
+	x,
+	y,
+	range,
+	onTag,
+}: {
+	x: number;
+	y: number;
+	range: DiffFocusRange;
+	onTag: () => void;
+}) {
+	const sideLabel = range.side === "LEFT" ? "old" : "new";
+	const lineLabel =
+		range.start_line === range.end_line
+			? `${range.start_line}`
+			: `${range.start_line}–${range.end_line}`;
+	return (
+		<div
+			data-diff-context-menu
+			className="fixed z-50 min-w-[200px] overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md"
+			style={{ left: x, top: y }}
+			onMouseDown={(event) => event.stopPropagation()}
+		>
+			<button
+				type="button"
+				onClick={onTag}
+				className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent"
+			>
+				<Tag className="size-3.5" />
+				<span className="flex-1">Tag selection</span>
+				<span className="font-mono text-[10px] text-muted-foreground">
+					{`${lineLabel} (${sideLabel})`}
+				</span>
+			</button>
 		</div>
 	);
 }
@@ -413,10 +479,13 @@ export function DiffPane() {
 	const sectionIsProcessing = currentReviewId
 		? processingSectionIds.includes(currentReviewId)
 		: false;
+	const feedbackLoaded =
+		current?.kind === "review_section" && current.feedbackLoaded === true;
 	const canRequestFeedback = Boolean(
 		session &&
 			current?.kind === "review_section" &&
 			!sectionIsProcessing &&
+			!feedbackLoaded &&
 			(!section || !reviewSectionHasFeedback(section)),
 	);
 

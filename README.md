@@ -1,104 +1,107 @@
 # Guided Review
 
-Guided Review is a desktop app for walking through GitHub pull requests one section at a time. It shows the diff in the app, starts an ACP-compatible review agent in your local repository, and keeps the conversation focused on the current part of the change.
+Guided Review is a desktop app for reviewing GitHub pull requests with help from
+ACP-compatible coding agents.
 
-The app is built with Tauri 2, React, Vite, TypeScript, and Rust.
+Instead of reading one large diff at once, you pick a PR and let the app organize
+it into smaller sections. The diff, section list, chat, and comment drafts stay in
+one window, so you can keep your place while the agent helps you inspect the
+change.
+
+![Guided Review reviewing a pull request](screenshot.png)
+
+## Why Use It
+
+Pull request reviews are easier when you have a clear path through the change.
+Guided Review asks an ACP agent to propose review sections, walks through those
+sections one at a time, and keeps suggested comments as drafts until you approve
+them.
+
+It is not meant to replace your judgment. It is a way to get practical help from
+the coding agents already available on your machine.
 
 ## What It Does
 
 - Opens a local Git repository.
 - Accepts a GitHub PR number or PR URL.
 - Fetches the PR into the selected local repository.
-- Shows review sections, diff context, chat, and comment drafts in one place.
-- Lets the agent suggest PR comments, then waits for your approval before anything is posted.
+- Shows the PR description, changed files, review sections, chat, and draft
+  comments together.
+- Lets you ask the agent questions while staying focused on the current section.
+- Blocks mismatched PR URLs when they do not match the selected repository.
+- Waits for your approval before asking the agent to publish comments.
+
+## How It Works
+
+1. Choose a local repository folder.
+2. Enter a PR number, such as `123`, or paste a GitHub PR URL.
+3. Pick an available ACP review agent.
+4. Start the review.
+5. Walk through the generated sections.
+6. Approve only the comment drafts you want posted.
 
 ## Requirements
 
-- macOS, Windows, or Linux for development.
+To run Guided Review from source, you need:
+
 - Node.js and npm.
 - Rust and Cargo.
 - Git.
+- GitHub CLI (`gh`) for PR details and existing review comments.
 - The system dependencies required by Tauri for your OS.
-- Authentication for whichever ACP review agent you choose in the app.
+- Authentication for the ACP review agent you choose in the app.
 
-For macOS releases, you also need an Apple Developer account because the release workflow signs and notarizes the app.
+The agent also needs its own GitHub access if you want it to publish approved
+comments.
 
-## Install
+## Run From Source
+
+Install dependencies:
 
 ```sh
 npm install
 ```
 
-## Run The App
-
-Start the Tauri desktop app:
+Start the desktop app:
 
 ```sh
 npm run tauri -- dev
 ```
 
-Run only the Vite frontend:
+You can also start only the Vite frontend:
 
 ```sh
 npm run dev
 ```
 
-## Use The App
+The frontend-only command is useful for UI work, but Tauri features are not
+available there.
 
-1. Choose a local repository folder from the project picker.
-2. Enter a PR number, such as `123`, or paste a GitHub PR URL.
-3. Pick the review agent if more than one is available.
-4. Press Start.
-5. Review each generated section in order.
-6. Approve comment drafts only when you want them posted to GitHub.
+## Development
 
-The selected folder's `origin` remote is used as the repository source. If you paste a PR URL for a different repository, the app blocks the review so you do not review the wrong project by mistake.
-
-## Development Commands
+Useful commands:
 
 ```sh
 npm run check
 npm test
 npm run build
 npm run tauri -- build
+```
+
+- `npm run check` runs TypeScript checks.
+- `npm test` runs the unit tests.
+- `npm run build` builds the frontend.
+- `npm run tauri -- build` builds the desktop app.
+
+For contribution details, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Release Notes
+
+Local and CI release flows live in `scripts/local-release.mjs` and
+`.github/workflows/release.yml`. Maintainers can bump the app version with:
+
+```sh
 npm run bump-version -- patch
-npm run release:local
 ```
 
-`npm run check` runs TypeScript checks. `npm test` runs the unit tests. `npm run build` builds the frontend. `npm run tauri -- build` builds the desktop app. `npm run bump-version -- patch` bumps the app version across npm, Tauri, and Cargo metadata. You can also pass `minor`, `major`, or an exact version like `1.2.3`. `npm run release:local` loads Apple release values from `.env`, builds a signed universal macOS app, and publishes the generated assets with the GitHub CLI.
-
-For a local release build, copy `.env.example` to `.env`, fill in the Apple values, then run:
-
-```sh
-npm run release:local
-```
-
-For local builds, prefer the Developer ID Application certificate already installed in Keychain. Find the exact signing identity with:
-
-```sh
-security find-identity -v -p codesigning
-```
-
-Then set `APPLE_SIGNING_IDENTITY` in `.env`, for example:
-
-```sh
-APPLE_SIGNING_IDENTITY=Developer ID Application: Your Name (TEAMID)
-```
-
-The local release command uses these GitHub defaults:
-
-- tag: `guided-review-v<package.json version>`
-- title: `Guided Review v<package.json version>`
-- notes: `Signed and notarized macOS build. Download the app from the assets below.`
-
-Set `GH_REPO=owner/repo` in `.env` if the local Git remote is not the release target. Set `RELEASE_DRAFT=true` or `RELEASE_PRERELEASE=true` if needed. If the release already exists, the script uploads the new assets with `--clobber`.
-
-## Release Workflow
-
-The release workflow is in `.github/workflows/release.yml`. It is manually triggered from GitHub Actions.
-
-It does three main things:
-
-1. Builds a universal macOS app for Apple Silicon and Intel Macs.
-2. Signs and notarizes the app with Apple credentials stored as GitHub secrets.
-3. Creates or updates a GitHub Release and uploads the downloadable app bundle.
+You can also pass `minor`, `major`, or an exact version like `1.2.3`.

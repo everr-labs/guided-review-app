@@ -33,6 +33,7 @@ import {
 	assistantPartsToBlocks,
 	stripMarkdownForSummary,
 } from "@/lib/markdownContent";
+import { isChatScrolledToBottom } from "@/lib/chatScroll";
 import { MarkdownViewer } from "./MarkdownViewer";
 import {
 	Dialog,
@@ -254,6 +255,8 @@ export function ChatPanel() {
 		null,
 	);
 	const scrollerRef = useRef<HTMLDivElement>(null);
+	const bottomAnchorRef = useRef<HTMLDivElement>(null);
+	const stickToBottomRef = useRef(true);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const processingSection = processingSectionIds[0]
 		? sections.find((s) => s.id === processingSectionIds[0])
@@ -261,11 +264,17 @@ export function ChatPanel() {
 
 	useEffect(() => {
 		queueMicrotask(() => {
-			if (scrollerRef.current) {
-				scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
-		}
-	});
+			if (!stickToBottomRef.current) return;
+			bottomAnchorRef.current?.scrollIntoView({
+				block: "end",
+				inline: "nearest",
+			});
+		});
 	}, [chat, drafts, streaming, pendingDiffReferences]);
+
+	function handleChatScroll(e: React.UIEvent<HTMLDivElement>) {
+		stickToBottomRef.current = isChatScrolledToBottom(e.currentTarget);
+	}
 
 	async function send() {
 		if (!session) return;
@@ -393,12 +402,13 @@ export function ChatPanel() {
 			</div>
 			<div
 				ref={scrollerRef}
+				onScroll={handleChatScroll}
 				className="flex-1 space-y-3 overflow-y-auto px-4 py-4"
 			>
 				{chat.map((m) => {
 					if (m.item) {
 						return (
-							<div key={m.id} className="space-y-1">
+							<div key={m.id} className="chat-scroll-item space-y-1">
 								<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
 									{m.role}
 								</div>
@@ -409,7 +419,7 @@ export function ChatPanel() {
 					if (m.role === "user") {
 						if (!m.text.trim()) return null;
 						return (
-							<div key={m.id} className="space-y-1">
+							<div key={m.id} className="chat-scroll-item space-y-1">
 								<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
 									{m.role}
 								</div>
@@ -430,7 +440,7 @@ export function ChatPanel() {
 					const blocks = assistantPartsToBlocks(partsFromMessage(m));
 					if (blocks.length === 0 && !m.streaming) return null;
 					return (
-						<div key={m.id} className="space-y-1">
+						<div key={m.id} className="chat-scroll-item space-y-1">
 							<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
 								{m.role}
 							</div>
@@ -444,7 +454,7 @@ export function ChatPanel() {
 				})}
 				{streaming &&
 					(chat.length === 0 || chat[chat.length - 1].role === "user") && (
-						<div className="flex items-center gap-1.5 self-start rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+						<div className="chat-scroll-item flex items-center gap-1.5 self-start rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
 							<span className="block h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:0ms]" />
 							<span className="block h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:150ms]" />
 							<span className="block h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:300ms]" />
@@ -452,7 +462,7 @@ export function ChatPanel() {
 						</div>
 					)}
 				{drafts.length > 0 && (
-					<div className="flex flex-col gap-2 pt-2">
+					<div className="chat-scroll-item flex flex-col gap-2 pt-2">
 						{drafts.map((d) => (
 							<CommentDraftCard key={d.id} state={d} />
 						))}
@@ -470,6 +480,11 @@ export function ChatPanel() {
 						)}
 					</div>
 				)}
+				<div
+					ref={bottomAnchorRef}
+					className="chat-scroll-anchor !mt-0"
+					aria-hidden="true"
+				/>
 			</div>
 			<div className="space-y-2 border-t border-border bg-background/40 p-3">
 				{processingSectionIds.length > 0 && (

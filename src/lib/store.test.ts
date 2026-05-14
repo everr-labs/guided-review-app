@@ -309,6 +309,12 @@ test("upsertSection keeps PR description selected while first real section loads
 	assert.deepEqual(useApp.getState().processingSectionIds, []);
 	assert.equal(useApp.getState().sections[1]?.kind, "review_section");
 	assert.equal(useApp.getState().sections[1]?.status, "in_review");
+	assert.equal(
+		useApp.getState().sections[1]?.kind === "review_section"
+			? useApp.getState().sections[1]?.feedbackLoaded
+			: false,
+		true,
+	);
 });
 
 test("upsertSection preserves a non-PR-description selection when feedback arrives for another section", async () => {

@@ -172,18 +172,6 @@ export function buildGhReleaseCreateArgs(metadata, assets) {
 	);
 }
 
-export function buildGhReleaseUploadArgs(metadata, assets) {
-	const args = [
-		"release",
-		"upload",
-		metadata.tag,
-		...assets,
-		"--clobber",
-	];
-	if (metadata.repo) args.push("--repo", metadata.repo);
-	return args;
-}
-
 export function buildGhAuthStatusArgs() {
 	return ["auth", "status"];
 }
@@ -217,30 +205,12 @@ function run(command, args, env, options = {}) {
 	});
 }
 
-async function commandSucceeds(command, args, env) {
-	try {
-		await run(command, args, env, { stdio: "ignore" });
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 async function readAppVersion() {
 	const packageJson = JSON.parse(await fs.readFile("package.json", "utf8"));
 	return packageJson.version;
 }
 
 async function publishRelease(metadata, assets, env) {
-	const viewArgs = ["release", "view", metadata.tag];
-	if (metadata.repo) viewArgs.push("--repo", metadata.repo);
-
-	if (await commandSucceeds("gh", viewArgs, env)) {
-		console.log(`Release ${metadata.tag} already exists; uploading assets with --clobber.`);
-		await run("gh", buildGhReleaseUploadArgs(metadata, assets), env);
-		return;
-	}
-
 	console.log(`Creating GitHub release ${metadata.tag}.`);
 	await run("gh", buildGhReleaseCreateArgs(metadata, assets), env);
 }

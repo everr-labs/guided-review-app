@@ -169,6 +169,7 @@ export interface PrDescriptionSectionState extends BaseSectionState {
 export interface ReviewSectionState extends BaseSectionState {
 	kind: "review_section";
 	section?: ReviewSection;
+	feedbackLoaded?: boolean;
 }
 
 export type SectionState = PrDescriptionSectionState | ReviewSectionState;
@@ -282,6 +283,22 @@ function prDescriptionFromSession(
 			: "PR description unavailable.",
 		url: pr?.url,
 		error: session.pull_request_error,
+	};
+}
+
+function inferFeedbackLoaded(section: ReviewSectionState | undefined): boolean {
+	if (!section) return false;
+	if (typeof section.feedbackLoaded === "boolean") {
+		return section.feedbackLoaded;
+	}
+	return Boolean(section.section && section.status !== "pending");
+}
+
+function restoreSectionFeedbackLoaded(section: SectionState): SectionState {
+	if (section.kind !== "review_section") return section;
+	return {
+		...section,
+		feedbackLoaded: inferFeedbackLoaded(section),
 	};
 }
 
@@ -543,7 +560,7 @@ export const useApp = create<AppState>((set) => ({
 			});
 			set({
 				session,
-				sections: snapshot.sections,
+				sections: snapshot.sections.map(restoreSectionFeedbackLoaded),
 				currentSectionId: snapshot.current_section_id,
 				processingSectionIds: [],
 				chat: snapshot.chat,
@@ -611,6 +628,7 @@ export const useApp = create<AppState>((set) => ({
 						...entries.map((e): ReviewSectionState => {
 							const existing = existingReviewSections.get(e.section_id);
 							const section = mergeMapEntrySection(e, existing, state.session);
+							const feedbackLoaded = inferFeedbackLoaded(existing);
 							return {
 								id: e.section_id,
 								kind: "review_section",
@@ -619,10 +637,11 @@ export const useApp = create<AppState>((set) => ({
 								status:
 									existing?.status === "completed"
 										? "completed"
-										: section && hasSectionFeedback(section)
+										: feedbackLoaded || (section && hasSectionFeedback(section))
 											? "in_review"
 											: "pending",
 								section,
+								feedbackLoaded,
 							};
 						}),
 					],
@@ -650,6 +669,7 @@ export const useApp = create<AppState>((set) => ({
 					intent: normalizedSection.intent,
 					status: "in_review",
 					section: normalizedSection,
+					feedbackLoaded: true,
 				};
 				if (idx >= 0) sections[idx] = updated;
 				else sections.push(updated);
@@ -690,6 +710,7 @@ export const useApp = create<AppState>((set) => ({
 					intent: section.intent,
 					status: "in_review",
 					section,
+					feedbackLoaded: inferFeedbackLoaded(existing),
 				};
 				if (idx >= 0) sections[idx] = updated;
 				else sections.push(updated);

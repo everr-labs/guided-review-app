@@ -6,7 +6,6 @@ import test from "node:test";
 import {
 	buildGhAuthStatusArgs,
 	buildGhReleaseCreateArgs,
-	buildGhReleaseUploadArgs,
 	buildReleaseCommandArgs,
 	findReleaseAssets,
 	mergeReleaseEnv,
@@ -176,7 +175,7 @@ test("findReleaseAssets discovers downloadable macOS bundle files", async () => 
 	}
 });
 
-test("gh release commands create or update release assets", () => {
+test("gh release create publishes a new release entry with assets", () => {
 	const metadata = {
 		tag: "guided-review-v0.1.0",
 		title: "Guided Review v0.1.0",
@@ -198,17 +197,6 @@ test("gh release commands create or update release assets", () => {
 		"--notes",
 		"Download below.",
 		"--draft",
-		"--repo",
-		"everr-labs/guided-review-app",
-	]);
-
-	assert.deepEqual(buildGhReleaseUploadArgs(metadata, assets), [
-		"release",
-		"upload",
-		"guided-review-v0.1.0",
-		"app.dmg",
-		"app.app.tar.gz",
-		"--clobber",
 		"--repo",
 		"everr-labs/guided-review-app",
 	]);

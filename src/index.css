@@ -71,3 +71,14 @@
 		color: var(--foreground);
 	}
 }
+
+@layer utilities {
+	.chat-scroll-item {
+		overflow-anchor: none;
+	}
+
+	.chat-scroll-anchor {
+		height: 1px;
+		overflow-anchor: auto;
+	}
+}

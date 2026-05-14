@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
-import { useApp, type SessionInfo } from "@/lib/store";
+import {
+	useApp,
+	type ReviewSectionState,
+	type SessionInfo,
+} from "@/lib/store";
 import {
 	on,
 	acp,
@@ -45,6 +49,7 @@ import {
 	createReviewSnapshot,
 	saveReviewRequestFromSession,
 } from "@/lib/reviewPersistence";
+import { findNextSectionToAutoLoad } from "@/lib/sectionQueue";
 import { ghCliNeedsInstallPopup, ghCliPopupMessage } from "@/lib/ghCli";
 import {
 	Dialog,
@@ -101,6 +106,31 @@ async function enrichSectionMapWithLocalRanges(
 			}
 		}),
 	);
+}
+
+interface SectionTaskTarget {
+	sectionId: string;
+	title: string;
+	intent: string;
+	files: string[];
+}
+
+function targetFromMapEntry(entry: SectionMapEntry): SectionTaskTarget {
+	return {
+		sectionId: entry.section_id,
+		title: entry.title,
+		intent: entry.intent,
+		files: entry.files ?? [],
+	};
+}
+
+function targetFromReviewSection(section: ReviewSectionState): SectionTaskTarget {
+	return {
+		sectionId: section.id,
+		title: section.title,
+		intent: section.intent,
+		files: section.section?.files ?? [],
+	};
 }
 
 export default function App() {
@@ -187,13 +217,87 @@ export default function App() {
 		let cancelled = false;
 		const registered: Unlisten[] = [];
 
-		const handleSectionMap = async (p: SectionMapEvent) => {
-				recordClientTelemetry("client.acp.section_map.received", {
-					"acp.session_id": p.session_id,
-					"section.count": p.map.sections.length,
+		const startSectionTask = async (
+			sess: SessionInfo,
+			target: SectionTaskTarget,
+			reason: "auto_open_first" | "auto_load_next",
+		): Promise<boolean> => {
+			startSectionProcessing(target.sectionId);
+			recordClientTelemetry("client.acp.section_task.auto_load_sending", {
+				"acp.session_id": sess.session_id,
+				"section.id": target.sectionId,
+				"section.title": target.title,
+				"section.auto_load_reason": reason,
+			});
+			try {
+				const state = useApp.getState();
+				const publishedCommentContext = formatPublishedCommentsForPrompt(
+					state.session?.session_id === sess.session_id
+						? state.publishedComments
+						: (sess.published_comments ?? []),
+					state.session?.session_id === sess.session_id
+						? (state.publishedCommentsError ?? undefined)
+						: sess.published_comments_error,
+				);
+				await acp.startSectionTask({
+					parent_session_id: sess.session_id,
+					section_id: target.sectionId,
+					title: target.title,
+					intent: target.intent,
+					files: target.files,
+					base_ref: sess.repo.base_ref,
+					head_ref: sess.repo.head_ref,
+					published_comment_context: publishedCommentContext,
 				});
-				setSectionMap(p.map.sections);
-				if (!p.suppress_chat) addSectionMapItem(p.map.sections);
+				recordClientTelemetry("client.acp.section_task.auto_load_sent", {
+					"acp.session_id": sess.session_id,
+					"section.id": target.sectionId,
+					"section.auto_load_reason": reason,
+				});
+				return true;
+			} catch (e) {
+				finishSectionProcessing(target.sectionId);
+				recordClientTelemetryError(
+					"client.acp.section_task.auto_load_failed",
+					e,
+					{
+						"acp.session_id": sess.session_id,
+						"section.id": target.sectionId,
+						"section.auto_load_reason": reason,
+					},
+				);
+				pushError(`section auto-load failed: ${e}`);
+				return false;
+			}
+		};
+
+		const startNextSectionAfter = (completedSectionId: string, sessionId: string) => {
+			if (cancelled) return;
+			const state = useApp.getState();
+			const sess = state.session;
+			if (!sess || sess.session_id !== sessionId) return;
+			const next = findNextSectionToAutoLoad(
+				state.sections,
+				completedSectionId,
+				state.processingSectionIds,
+			);
+			recordClientTelemetry("client.acp.section_task.auto_load_next_evaluated", {
+				"acp.session_id": sessionId,
+				"section.completed_id": completedSectionId,
+				"section.next_id": next?.id,
+				"auto_load.will_send": !!next,
+			});
+			if (!next) return;
+			void startSectionTask(sess, targetFromReviewSection(next), "auto_load_next");
+		};
+
+		const handleSectionMap = async (p: SectionMapEvent) => {
+			recordClientTelemetry("client.acp.section_map.received", {
+				"acp.session_id": p.session_id,
+				"section.count": p.map.sections.length,
+			});
+			setSectionMap(p.map.sections);
+			if (!p.suppress_chat) addSectionMapItem(p.map.sections);
 			const sess = useApp.getState().session;
 			const sectionsWithRanges = sess
 				? await enrichSectionMapWithLocalRanges(sess, p.map.sections)
@@ -208,42 +312,24 @@ export default function App() {
 				"session.current_id": sess?.session_id,
 				"section.first_id": first?.section_id,
 				"section.count": sectionsWithRanges.length,
-					"auto_open.will_send": !!first && !!sess,
+				"auto_open.will_send": !!first && !!sess,
+			});
+			if (first && sess) {
+				recordClientTelemetry("client.acp.section_map.auto_open_sending", {
+					"acp.session_id": sess.session_id,
+					"section.id": first.section_id,
+					"section.title": first.title,
 				});
-				if (first && sess) {
-					try {
-					startSectionProcessing(first.section_id);
-					recordClientTelemetry("client.acp.section_map.auto_open_sending", {
-						"acp.session_id": sess.session_id,
-						"section.id": first.section_id,
-						"section.title": first.title,
-					});
-					const publishedCommentContext = formatPublishedCommentsForPrompt(
-						sess.published_comments ?? [],
-						sess.published_comments_error,
-					);
-						await acp.startSectionTask({
-							parent_session_id: sess.session_id,
-							section_id: first.section_id,
-							title: first.title,
-							intent: first.intent,
-							files: first.files ?? [],
-							base_ref: sess.repo.base_ref,
-							head_ref: sess.repo.head_ref,
-							published_comment_context: publishedCommentContext,
-						});
-					recordClientTelemetry("client.acp.section_map.auto_open_sent", {
-						"acp.session_id": sess.session_id,
-						"section.id": first.section_id,
-					});
-				} catch (e) {
-					finishSectionProcessing(first.section_id);
-					recordClientTelemetryError("client.acp.auto_open.failed", e, {
-						"acp.session_id": sess.session_id,
-						"section.id": first.section_id,
-					});
-					pushError(`auto-open failed: ${e}`);
-				}
+				const sent = await startSectionTask(
+					sess,
+					targetFromMapEntry(first),
+					"auto_open_first",
+				);
+				if (!sent) return;
+				recordClientTelemetry("client.acp.section_map.auto_open_sent", {
+					"acp.session_id": sess.session_id,
+					"section.id": first.section_id,
+				});
 			}
 		};
 
@@ -264,6 +350,7 @@ export default function App() {
 			if (merged?.kind === "review_section" && merged.section) {
 				addReviewSectionItem(merged.section);
 			}
+			startNextSectionAfter(p.section.section_id, p.session_id);
 		};
 
 		const handleSectionProgress = (p: SectionProgressEvent) => {
