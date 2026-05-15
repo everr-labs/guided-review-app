@@ -6,6 +6,7 @@ import test from "node:test";
 import {
 	buildGhAuthStatusArgs,
 	buildGhReleaseCreateArgs,
+	buildGhReleaseViewArgs,
 	buildReleaseCommandArgs,
 	findReleaseAssets,
 	mergeReleaseEnv,
@@ -121,10 +122,10 @@ test("buildReleaseCommandArgs targets a universal macOS app", () => {
 	]);
 });
 
-test("releaseMetadata uses package version defaults and optional .env overrides", () => {
-	assert.deepEqual(releaseMetadata({}, "0.1.0"), {
-		tag: "guided-review-v0.1.0",
-		title: "Guided Review v0.1.0",
+test("releaseMetadata derives the default tag from the Tauri version with optional .env overrides", () => {
+	assert.deepEqual(releaseMetadata({}, "0.5.0"), {
+		tag: "guided-review-v0.5.0",
+		title: "Guided Review v0.5.0",
 		notes:
 			"Signed and notarized macOS build. Download the app from the assets below.",
 		draft: false,
@@ -135,18 +136,18 @@ test("releaseMetadata uses package version defaults and optional .env overrides"
 	assert.deepEqual(
 		releaseMetadata(
 			{
-				RELEASE_TAG: "custom-v0.1.0",
-				RELEASE_NAME: "Custom 0.1.0",
+				RELEASE_TAG: "custom-v0.5.0",
+				RELEASE_NAME: "Custom 0.5.0",
 				RELEASE_NOTES: "Custom notes",
 				RELEASE_DRAFT: "true",
 				RELEASE_PRERELEASE: "1",
 				GH_REPO: "everr-labs/guided-review-app",
 			},
-			"0.1.0",
+			"0.5.0",
 		),
 		{
-			tag: "custom-v0.1.0",
-			title: "Custom 0.1.0",
+			tag: "custom-v0.5.0",
+			title: "Custom 0.5.0",
 			notes: "Custom notes",
 			draft: true,
 			prerelease: true,
@@ -200,6 +201,26 @@ test("gh release create publishes a new release entry with assets", () => {
 		"--repo",
 		"everr-labs/guided-review-app",
 	]);
+});
+
+test("gh release view args probe whether a tag already exists", () => {
+	assert.deepEqual(
+		buildGhReleaseViewArgs({ tag: "guided-review-20260514-143055" }),
+		["release", "view", "guided-review-20260514-143055"],
+	);
+	assert.deepEqual(
+		buildGhReleaseViewArgs({
+			tag: "guided-review-20260514-143055",
+			repo: "everr-labs/guided-review-app",
+		}),
+		[
+			"release",
+			"view",
+			"guided-review-20260514-143055",
+			"--repo",
+			"everr-labs/guided-review-app",
+		],
+	);
 });
 
 test("gh auth command checks local GitHub CLI setup before building", () => {

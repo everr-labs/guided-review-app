@@ -172,6 +172,12 @@ export function buildGhReleaseCreateArgs(metadata, assets) {
 	);
 }
 
+export function buildGhReleaseViewArgs(metadata) {
+	const args = ["release", "view", metadata.tag];
+	if (metadata.repo) args.push("--repo", metadata.repo);
+	return args;
+}
+
 export function buildGhAuthStatusArgs() {
 	return ["auth", "status"];
 }
@@ -206,8 +212,30 @@ function run(command, args, env, options = {}) {
 }
 
 async function readAppVersion() {
-	const packageJson = JSON.parse(await fs.readFile("package.json", "utf8"));
-	return packageJson.version;
+	const tauriConfig = JSON.parse(
+		await fs.readFile(path.join("src-tauri", "tauri.conf.json"), "utf8"),
+	);
+	if (!tauriConfig.version) {
+		throw new Error("src-tauri/tauri.conf.json is missing a version field.");
+	}
+	return tauriConfig.version;
+}
+
+async function commandSucceeds(command, args, env) {
+	try {
+		await run(command, args, env, { stdio: "ignore" });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function ensureReleaseTagAvailable(metadata, env) {
+	if (await commandSucceeds("gh", buildGhReleaseViewArgs(metadata), env)) {
+		throw new Error(
+			`Release tag ${metadata.tag} already exists on GitHub. Set RELEASE_TAG to a different value or delete the existing release before retrying.`,
+		);
+	}
 }
 
 async function publishRelease(metadata, assets, env) {
@@ -225,17 +253,20 @@ async function main() {
 		throw new Error(`Missing release env vars: ${missing.join(", ")}`);
 	}
 
-	const args = buildReleaseCommandArgs(extraArgs);
-
 	console.log(`Loaded release environment from ${envPath}`);
 	console.log("Checking GitHub CLI authentication.");
 	await run("gh", buildGhAuthStatusArgs(), env);
+
+	const version = await readAppVersion();
+	const metadata = releaseMetadata(env, version);
+	console.log(`Verifying release tag ${metadata.tag} is available.`);
+	await ensureReleaseTagAvailable(metadata, env);
+
+	const args = buildReleaseCommandArgs(extraArgs);
 	console.log(`Running: npm ${args.join(" ")}`);
 	const buildEnv = releaseBuildEnv(env);
 	await run("npm", args, buildEnv);
 
-	const version = await readAppVersion();
-	const metadata = releaseMetadata(env, version);
 	const bundleDir = path.join(
 		"src-tauri",
 		"target",
