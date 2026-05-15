@@ -46,6 +46,8 @@ pub struct StartSectionTaskRequest {
     pub base_ref: String,
     pub head_ref: String,
     pub published_comment_context: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_concerns_hint: Option<String>,
 }
 
 const AGENT_SKILL: &str = include_str!(".././agent-skill.md");
@@ -79,6 +81,14 @@ fn build_section_task_prompt(req: &StartSectionTaskRequest, repo_path: &Path) ->
             .join("\n")
     };
 
+    let additional_concerns_hint = req
+        .additional_concerns_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+        .map(|hint| format!("\n\n{hint}"))
+        .unwrap_or_default();
+
     format!(
         r#"You are analysing one section of a code review inside the guided-review desktop app.
 
@@ -91,7 +101,7 @@ Intent: {intent}
 Files:
 {files}
 
-{published_comment_context}
+{published_comment_context}{additional_concerns_hint}
 
 Read the diff for this section with your built-in tools. Identify only real concerns that follow from the actual code. Use simple language.
 
@@ -121,6 +131,7 @@ If there are no actionable concerns, emit `"concerns": []`.
         intent = req.intent,
         files = files,
         published_comment_context = req.published_comment_context,
+        additional_concerns_hint = additional_concerns_hint,
     )
 }
 
@@ -621,6 +632,7 @@ mod tests {
             head_ref: "feature".to_string(),
             published_comment_context: "Existing published comments:\n- Already covered."
                 .to_string(),
+            additional_concerns_hint: None,
         };
 
         let prompt = build_section_task_prompt(&req, Path::new("/tmp/repo"));
@@ -633,5 +645,26 @@ mod tests {
         assert!(prompt.contains("Existing published comments:\n- Already covered."));
         assert!(prompt.contains("Emit exactly one final ```acp-section fenced block"));
         assert!(prompt.contains("Do not include `title`, `intent`, `files`, `ranges`, `unimportant_ranges`, `base_ref`, or `head_ref`"));
+    }
+
+    #[test]
+    fn section_task_prompt_includes_additional_concerns_hint_when_present() {
+        let req = StartSectionTaskRequest {
+            parent_session_id: "parent-session".to_string(),
+            section_id: "metadata-retention".to_string(),
+            title: "Metadata retention".to_string(),
+            intent: "Check how saved metadata is preserved.".to_string(),
+            files: vec!["src/lib/store.ts".to_string()],
+            base_ref: "origin/main".to_string(),
+            head_ref: "feature".to_string(),
+            published_comment_context: "No prior comments.".to_string(),
+            additional_concerns_hint: Some(
+                "Already surfaced:\n- Concern A\nReturn the full list.".to_string(),
+            ),
+        };
+
+        let prompt = build_section_task_prompt(&req, Path::new("/tmp/repo"));
+
+        assert!(prompt.contains("Already surfaced:\n- Concern A\nReturn the full list."));
     }
 }

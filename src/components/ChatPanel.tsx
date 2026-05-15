@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "@/lib/store";
 import { acp } from "@/lib/acp";
 import { Textarea } from "@/components/ui/textarea";
@@ -7,11 +7,14 @@ import { CommentDraftCard } from "./CommentDraftCard";
 import { SeverityBadge } from "./SeverityBadge";
 import { cn } from "@/lib/utils";
 import {
+	Check,
+	Copy,
 	FileText,
 	ListChecks,
 	LoaderCircle,
 	Map,
 	Maximize2,
+	Sparkles,
 	Wrench,
 	X,
 } from "lucide-react";
@@ -21,9 +24,11 @@ import {
 	requestAgentPublishApprovedDrafts,
 } from "@/lib/commentPublish";
 import {
+	createDiffFocusRange,
 	formatDiffReferenceForMessage,
 	formatDiffReferenceLabel,
 } from "@/lib/diffFocus";
+import { formatPublishedCommentsForPrompt } from "@/lib/publishedComments";
 import {
 	buildUserMessageWithReviewContext,
 	createReviewSnapshot,
@@ -47,10 +52,111 @@ import type {
 	ChatMessage,
 	ChatMessagePart,
 	Concern,
+	ReviewSection,
 	ToolCallItem,
 } from "@/lib/types/section";
 
-function FeedbackList({ title, concerns }: { title: string; concerns: Concern[] }) {
+function formatConcernForCopy(concern: Concern): string {
+	const text = concern.text.trim();
+	if (!concern.file_path) return text;
+	const location = concern.line
+		? `${concern.file_path}:${concern.line}`
+		: concern.file_path;
+	return text ? `${text}\n${location}` : location;
+}
+
+function ConcernItem({
+	concern,
+	onOpenLocation,
+}: {
+	concern: Concern;
+	onOpenLocation: (concern: Concern) => void;
+}) {
+	const [copied, setCopied] = useState(false);
+	const copyTimeoutRef = useRef<number | null>(null);
+
+	useEffect(() => {
+		return () => {
+			if (copyTimeoutRef.current !== null) {
+				window.clearTimeout(copyTimeoutRef.current);
+			}
+		};
+	}, []);
+
+	const copy = useCallback(async () => {
+		const payload = formatConcernForCopy(concern);
+		try {
+			await navigator.clipboard.writeText(payload);
+			setCopied(true);
+			if (copyTimeoutRef.current !== null) {
+				window.clearTimeout(copyTimeoutRef.current);
+			}
+			copyTimeoutRef.current = window.setTimeout(() => setCopied(false), 1500);
+		} catch {
+			// Browser/WebView refused clipboard write; fall through silently.
+		}
+	}, [concern]);
+
+	const hasLocation = Boolean(concern.file_path);
+	const locationLabel = concern.file_path
+		? concern.line
+			? `${concern.file_path}:${concern.line}`
+			: concern.file_path
+		: null;
+
+	return (
+		<li className="group flex items-start gap-2 text-xs">
+			<SeverityBadge severity={concern.severity} />
+			<div className="min-w-0 flex-1">
+				<div>{concern.text}</div>
+				{locationLabel && (
+					hasLocation && concern.line ? (
+						<button
+							type="button"
+							onClick={() => onOpenLocation(concern)}
+							className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus:outline-hidden focus-visible:text-foreground focus-visible:underline"
+							title="Open this line in the diff"
+						>
+							{locationLabel}
+						</button>
+					) : (
+						<div className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+							{locationLabel}
+						</div>
+					)
+				)}
+			</div>
+			<button
+				type="button"
+				onClick={copy}
+				className={cn(
+					"inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-opacity hover:bg-muted/60 hover:text-foreground focus:outline-hidden focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-primary",
+					copied
+						? "opacity-100"
+						: "opacity-0 group-hover:opacity-100",
+				)}
+				aria-label={copied ? "Copied" : "Copy concern"}
+				title={copied ? "Copied" : "Copy concern"}
+			>
+				{copied ? (
+					<Check className="size-3 text-primary" />
+				) : (
+					<Copy className="size-3" />
+				)}
+			</button>
+		</li>
+	);
+}
+
+function FeedbackList({
+	title,
+	concerns,
+	onOpenLocation,
+}: {
+	title: string;
+	concerns: Concern[];
+	onOpenLocation: (concern: Concern) => void;
+}) {
 	if (concerns.length === 0) return null;
 	return (
 		<div className="space-y-1.5">
@@ -59,20 +165,146 @@ function FeedbackList({ title, concerns }: { title: string; concerns: Concern[] 
 			</div>
 			<ul className="space-y-1.5">
 				{concerns.map((concern, index) => (
-					<li key={index} className="flex items-start gap-2 text-xs">
-						<SeverityBadge severity={concern.severity} />
-						<div className="min-w-0 flex-1">
-							<div>{concern.text}</div>
-							{concern.file_path && (
-								<div className="mt-0.5 font-mono text-[10px] text-muted-foreground">
-									{concern.file_path}
-									{concern.line ? `:${concern.line}` : ""}
-								</div>
-							)}
-						</div>
-					</li>
+					<ConcernItem
+						key={index}
+						concern={concern}
+						onOpenLocation={onOpenLocation}
+					/>
 				))}
 			</ul>
+		</div>
+	);
+}
+
+function ReviewSectionCard({ section }: { section: ReviewSection }) {
+	const hasFeedback = section.concerns.length > 0;
+	const sectionId = section.section_id;
+	const isProcessing = useApp((s) =>
+		s.processingSectionIds.includes(sectionId),
+	);
+	const setCurrentSection = useApp((s) => s.setCurrentSection);
+	const setDiffFocus = useApp((s) => s.setDiffFocus);
+	const startSectionProcessing = useApp((s) => s.startSectionProcessing);
+	const finishSectionProcessing = useApp((s) => s.finishSectionProcessing);
+	const pushError = useApp((s) => s.pushError);
+
+	const openConcernLocation = useCallback(
+		(concern: Concern) => {
+			if (!concern.file_path || !concern.line) return;
+			setCurrentSection(sectionId, "concern_link_clicked");
+			const range = createDiffFocusRange({
+				file_path: concern.file_path,
+				start_line: concern.line,
+				end_line: concern.line,
+				side: "RIGHT",
+				source: "user",
+				mode: "navigation",
+			});
+			if (range) setDiffFocus(range);
+		},
+		[sectionId, setCurrentSection, setDiffFocus],
+	);
+
+	const requestMoreConcerns = useCallback(async () => {
+		const state = useApp.getState();
+		const session = state.session;
+		if (!session) return;
+		const current = state.sections.find((s) => s.id === sectionId);
+		if (current?.kind !== "review_section") return;
+		const liveSection = current.section ?? section;
+		startSectionProcessing(sectionId);
+		try {
+			const publishedCommentContext = formatPublishedCommentsForPrompt(
+				state.publishedComments,
+				state.publishedCommentsError ?? undefined,
+			);
+			await acp.startSectionTask({
+				parent_session_id: session.session_id,
+				section_id: sectionId,
+				title: current.title || liveSection.title,
+				intent: current.intent || liveSection.intent,
+				files: liveSection.files,
+				base_ref: liveSection.base_ref || session.repo.base_ref,
+				head_ref: liveSection.head_ref || session.repo.head_ref,
+				published_comment_context: publishedCommentContext,
+				additional_concerns_hint: buildExistingConcernsHint(
+					liveSection.concerns,
+				),
+			});
+		} catch (e) {
+			finishSectionProcessing(sectionId);
+			pushError(`load more concerns failed: ${e}`);
+		}
+	}, [
+		section,
+		sectionId,
+		startSectionProcessing,
+		finishSectionProcessing,
+		pushError,
+	]);
+
+	return (
+		<div className="rounded-md border border-border bg-card px-3 py-2 text-sm">
+			<div className="mb-2 flex items-center gap-2 font-semibold">
+				<ListChecks className="size-4 text-muted-foreground" />
+				<span>{section.title}</span>
+			</div>
+			<div className="mb-2 text-xs text-muted-foreground">
+				{stripMarkdownForSummary(section.intent)}
+			</div>
+			{section.files.length > 0 && (
+				<div className="mb-3 space-y-1.5">
+					<div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+						<FileText className="size-3" />
+						<span>Files</span>
+					</div>
+					<div className="flex flex-wrap gap-1.5">
+						{section.files.map((file) => (
+							<span
+								key={file}
+								className="max-w-full truncate rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-[10px]"
+							>
+								{file}
+							</span>
+						))}
+					</div>
+				</div>
+			)}
+			{hasFeedback ? (
+				<div className="space-y-3">
+					<FeedbackList
+						title="Concerns"
+						concerns={section.concerns}
+						onOpenLocation={openConcernLocation}
+					/>
+				</div>
+			) : (
+				<div className="text-xs text-muted-foreground">
+					No concerns found for this section.
+				</div>
+			)}
+			<div className="mt-3 flex justify-end">
+				<Button
+					type="button"
+					variant="ghost"
+					size="sm"
+					onClick={requestMoreConcerns}
+					disabled={isProcessing}
+					className="h-7 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+					title={
+						hasFeedback
+							? "Ask the agent for additional concerns"
+							: "Re-run the agent for this section"
+					}
+				>
+					{isProcessing ? (
+						<LoaderCircle className="size-3 animate-spin" />
+					) : (
+						<Sparkles className="size-3" />
+					)}
+					{hasFeedback ? "Load more concerns" : "Load concerns"}
+				</Button>
+			</div>
 		</div>
 	);
 }
@@ -104,49 +336,32 @@ function ChatItemView({ item }: { item: ChatItem }) {
 	}
 
 	if (item.type === "review_section") {
-		const { section } = item;
-		const hasFeedback = section.concerns.length > 0;
-		return (
-			<div className="rounded-md border border-border bg-card px-3 py-2 text-sm">
-				<div className="mb-2 flex items-center gap-2 font-semibold">
-					<ListChecks className="size-4 text-muted-foreground" />
-					<span>{section.title}</span>
-				</div>
-				<div className="mb-2 text-xs text-muted-foreground">
-					{stripMarkdownForSummary(section.intent)}
-				</div>
-				{section.files.length > 0 && (
-					<div className="mb-3 space-y-1.5">
-						<div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-							<FileText className="size-3" />
-							<span>Files</span>
-						</div>
-						<div className="flex flex-wrap gap-1.5">
-							{section.files.map((file) => (
-								<span
-									key={file}
-									className="max-w-full truncate rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-[10px]"
-								>
-									{file}
-								</span>
-							))}
-						</div>
-					</div>
-				)}
-				{hasFeedback ? (
-					<div className="space-y-3">
-						<FeedbackList title="Concerns" concerns={section.concerns} />
-					</div>
-				) : (
-					<div className="text-xs text-muted-foreground">
-						No concerns found for this section.
-					</div>
-				)}
-			</div>
-		);
+		return <ReviewSectionCard section={item.section} />;
 	}
 
 	return null;
+}
+
+function buildExistingConcernsHint(concerns: Concern[]): string | undefined {
+	if (concerns.length === 0) return undefined;
+	const lines = concerns
+		.map((concern) => {
+			const text = concern.text.trim();
+			if (!text) return null;
+			const location = concern.file_path
+				? concern.line
+					? ` (${concern.file_path}:${concern.line})`
+					: ` (${concern.file_path})`
+				: "";
+			return `- ${text}${location}`;
+		})
+		.filter((line): line is string => line !== null);
+	if (lines.length === 0) return undefined;
+	return [
+		"Concerns already surfaced for this section (do not repeat these — look for additional, distinct issues):",
+		...lines,
+		"Re-emit the full concerns list including these existing ones plus any new ones you find.",
+	].join("\n");
 }
 
 function partsFromMessage(message: ChatMessage): ChatMessagePart[] {

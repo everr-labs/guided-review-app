@@ -94,6 +94,7 @@ export interface StartSectionTaskRequest {
 	base_ref: string;
 	head_ref: string;
 	published_comment_context: string;
+	additional_concerns_hint?: string;
 }
 
 export interface DiffPatch {

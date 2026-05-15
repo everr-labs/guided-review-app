@@ -17,6 +17,7 @@ import {
 	focusSideToPierreSide,
 	formatDiffFocusHeader,
 	type DiffFocusRange,
+	type DiffFocusSide,
 } from "@/lib/diffFocus";
 import { resolveDiffSelectionRange } from "@/lib/diffSelection";
 import { computeFileDiffStats, isDeletionOnlyDiff } from "@/lib/diffStats";
@@ -86,6 +87,40 @@ function focusRangeToPierreSelection(
 		side,
 		endSide: side,
 	};
+}
+
+function scrollDiffLineIntoView(
+	host: HTMLElement,
+	line: number,
+	side: DiffFocusSide,
+	attempt = 0,
+): void {
+	const container = host.querySelector("diffs-container");
+	const shadowRoot =
+		container instanceof HTMLElement ? container.shadowRoot : null;
+	if (!shadowRoot) {
+		if (attempt < 30) {
+			window.requestAnimationFrame(() =>
+				scrollDiffLineIntoView(host, line, side, attempt + 1),
+			);
+		}
+		return;
+	}
+	const preferredType =
+		side === "RIGHT" ? "change-addition" : "change-deletion";
+	const target =
+		shadowRoot.querySelector(
+			`[data-line="${line}"][data-line-type="${preferredType}"]`,
+		) ?? shadowRoot.querySelector(`[data-line="${line}"]`);
+	if (!(target instanceof HTMLElement)) {
+		if (attempt < 30) {
+			window.requestAnimationFrame(() =>
+				scrollDiffLineIntoView(host, line, side, attempt + 1),
+			);
+		}
+		return;
+	}
+	target.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function feedbackLocation(note: SectionFeedbackNote): string | null {
@@ -170,11 +205,13 @@ function DiffFileCard({
 	toggleFileCollapsed: (filePath: string) => void;
 	unimportantRanges: UnimportantRange[];
 }) {
-	const agentFocus = useApp((s) =>
-		s.diffFocus?.source === "agent" && s.diffFocus.file_path === bundle.file_path
-			? s.diffFocus
-			: null,
-	);
+	const activeFocus = useApp((s) => {
+		const focus = s.diffFocus;
+		if (!focus || focus.file_path !== bundle.file_path) return null;
+		if (focus.source === "agent") return focus;
+		if (focus.mode === "navigation") return focus;
+		return null;
+	});
 	const pendingDiffReferences = useApp((s) => s.pendingDiffReferences);
 	const publishedComments = useApp((s) => s.publishedComments);
 	const [revealedUnimportantRanges, setRevealedUnimportantRanges] = useState<
@@ -204,8 +241,8 @@ function DiffFileCard({
 	const selectedLines: SelectedLineRange | null = useMemo(() => {
 		const latestPending = pendingForFile.at(-1);
 		if (latestPending) return focusRangeToPierreSelection(latestPending);
-		return agentFocus ? focusRangeToPierreSelection(agentFocus) : null;
-	}, [pendingForFile, agentFocus]);
+		return activeFocus ? focusRangeToPierreSelection(activeFocus) : null;
+	}, [pendingForFile, activeFocus]);
 
 	const lineAnnotations = useMemo(
 		(): DiffLineAnnotation<DiffAnnotationMetadata>[] => {
@@ -293,6 +330,14 @@ function DiffFileCard({
 			window.removeEventListener("keydown", onKey);
 		};
 	}, [contextMenu, closeContextMenu]);
+
+	useEffect(() => {
+		if (collapsed) return;
+		if (!activeFocus || activeFocus.mode !== "navigation") return;
+		const host = hostRef.current;
+		if (!host) return;
+		scrollDiffLineIntoView(host, activeFocus.start_line, activeFocus.side);
+	}, [activeFocus, collapsed]);
 
 	const renderAnnotation = useCallback(
 		(annotation: DiffLineAnnotation<DiffAnnotationMetadata>) => {
@@ -572,7 +617,10 @@ export function DiffPane() {
 		setAgentFocusLabel(null);
 		setDiffFocusError(null);
 		const currentFocus = useApp.getState().diffFocus;
-		if (currentFocus?.source === "user") {
+		if (
+			currentFocus?.source === "user" &&
+			currentFocus.mode !== "navigation"
+		) {
 			clearDiffFocus(currentFocus.id);
 		}
 	}, [currentId, clearDiffFocus, setDiffFocusError]);
