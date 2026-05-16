@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import type { DiffFocusRange } from "./diffFocus";
 import type { ChatMessage } from "./types/section";
 import type { LocalProject } from "./projectSource";
 import type { SectionState } from "./store";
@@ -61,34 +60,6 @@ const publishedComment = {
 	is_outdated: false,
 };
 
-const diffRefA: DiffFocusRange = {
-	id: "ref-a",
-	file_path: "src/lib/store.ts",
-	start_line: 12,
-	end_line: 14,
-	side: "RIGHT",
-	source: "user",
-	mode: "draft-reference",
-	created_at: 1,
-};
-
-const duplicateDiffRefA: DiffFocusRange = {
-	...diffRefA,
-	id: "ref-a-new-id",
-	created_at: 2,
-};
-
-const diffRefB: DiffFocusRange = {
-	id: "ref-b",
-	file_path: "src/lib/store.ts",
-	start_line: 21,
-	end_line: 21,
-	side: "LEFT",
-	source: "user",
-	mode: "draft-reference",
-	created_at: 3,
-};
-
 async function resetReviewState() {
 	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
 	useApp.setState({
@@ -107,7 +78,6 @@ async function resetReviewState() {
 		structuredReviewBlockOpen: false,
 		diffFocus: null,
 		diffFocusError: null,
-		pendingDiffReferences: [],
 	});
 }
 
@@ -298,7 +268,6 @@ test("upsertSection keeps PR description selected while first real section loads
 		intent: "Understand the change",
 		files: [],
 		ranges: [],
-		unimportant_ranges: [],
 		concerns: [],
 		base_ref: "base",
 		head_ref: "head",
@@ -344,7 +313,6 @@ test("upsertSection preserves a non-PR-description selection when feedback arriv
 		intent: "Understand the change",
 		files: [],
 		ranges: [],
-		unimportant_ranges: [],
 		concerns: [],
 		base_ref: "base",
 		head_ref: "head",
@@ -464,7 +432,6 @@ test("legacy full section cannot overwrite map-owned files and ranges", async ()
 				kind: "changed-new",
 			},
 		],
-		unimportant_ranges: [],
 		concerns: [],
 		base_ref: "wrong-base",
 		head_ref: "wrong-head",
@@ -714,7 +681,6 @@ test("App-style flow appends a fresh chat card every time feedback arrives for t
 			intent: "Understand the change",
 			files: [],
 			ranges: [],
-			unimportant_ranges: [],
 			concerns: [
 				{ text, severity: "medium" },
 			],
@@ -827,7 +793,6 @@ test("section processing state clears when the requested section arrives", async
 		intent: "Review metadata behavior",
 		files: [],
 		ranges: [],
-		unimportant_ranges: [],
 		concerns: [],
 		base_ref: "base",
 		head_ref: "head",
@@ -858,32 +823,6 @@ test("section processing tracks multiple background section tasks independently"
 	useApp.getState().finishSectionProcessing("metadata-retention-logic");
 
 	assert.deepEqual(useApp.getState().processingSectionIds, ["validation-flow"]);
-});
-
-test("pending diff references dedupe by file side and line range", async () => {
-	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
-	await resetReviewState();
-
-	useApp.getState().addPendingDiffReference(diffRefA);
-	useApp.getState().addPendingDiffReference(duplicateDiffRefA);
-
-	assert.deepEqual(useApp.getState().pendingDiffReferences, [diffRefA]);
-});
-
-test("pending diff references can remove one reference or clear all", async () => {
-	const { useApp } = await import(new URL("./store.ts", import.meta.url).href);
-	await resetReviewState();
-
-	useApp.getState().addPendingDiffReference(diffRefA);
-	useApp.getState().addPendingDiffReference(diffRefB);
-
-	useApp.getState().removePendingDiffReference(diffRefA.id);
-
-	assert.deepEqual(useApp.getState().pendingDiffReferences, [diffRefB]);
-
-	useApp.getState().clearPendingDiffReferences();
-
-	assert.deepEqual(useApp.getState().pendingDiffReferences, []);
 });
 
 test("addSectionMapItem stores readable section map details", async () => {
@@ -922,7 +861,6 @@ test("addReviewSectionItem stores readable files and feedback", async () => {
 		intent: "Review behavior changes",
 		files: ["src/lib.rs", "src/main.rs"],
 		ranges: [],
-		unimportant_ranges: [],
 		concerns: [
 			{
 				text: "Missing empty input check.",

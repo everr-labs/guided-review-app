@@ -1,6 +1,6 @@
 export type DiffFocusSide = "LEFT" | "RIGHT";
 export type DiffFocusSource = "user" | "agent";
-export type DiffFocusMode = "draft-reference" | "navigation";
+export type DiffFocusMode = "navigation";
 
 export interface DiffFocusRange {
 	id: string;
@@ -119,14 +119,6 @@ export function parseDiffFocusPayload(raw: unknown): DiffFocusPayload | null {
 		payload.reason = reason.trim();
 	}
 	return payload;
-}
-
-export function formatDiffReferenceLabel(range: DiffFocusRange): string {
-	return rangeRef(range);
-}
-
-export function formatDiffReferenceForMessage(range: DiffFocusRange): string {
-	return `Referenced diff range: ${rangeRef(range)}`;
 }
 
 export function formatDiffFocusHeader(range: DiffFocusRange): string {

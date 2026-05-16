@@ -33,8 +33,6 @@ struct SectionWire {
     #[serde(default)]
     ranges: Vec<crate::section::LineRange>,
     #[serde(default)]
-    unimportant_ranges: Vec<crate::section::UnimportantRange>,
-    #[serde(default)]
     concerns: Vec<crate::section::Concern>,
     #[serde(default)]
     base_ref: String,
@@ -150,7 +148,6 @@ fn handle_block(app: &AppHandle, session_id: &str, tag: &str, body: &str, suppre
                     intent: wire.intent,
                     files: wire.files,
                     ranges: wire.ranges,
-                    unimportant_ranges: wire.unimportant_ranges,
                     concerns: wire.concerns,
                     base_ref: wire.base_ref,
                     head_ref: wire.head_ref,

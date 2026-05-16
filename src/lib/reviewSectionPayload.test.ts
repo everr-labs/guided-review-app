@@ -68,38 +68,6 @@ test("parseReviewSectionPayload accepts feedback-only sections", () => {
 	assert.equal(section?.pause_prompt, "Want to leave a comment?");
 });
 
-test("parseReviewSectionPayload accepts unimportant ranges with reasons", () => {
-	const section = parseReviewSectionPayload({
-		section_id: "ui-noise",
-		title: "UI noise",
-		intent: "Small visual-only changes.",
-		files: ["src/App.tsx"],
-		unimportant_ranges: [
-			{
-				file_path: "src/App.tsx",
-				start_line: 10,
-				end_line: 24,
-				kind: "changed-new",
-				reason: "Import ordering only.",
-			},
-		],
-		concerns: [],
-		base_ref: "base",
-		head_ref: "head",
-	});
-
-	assert.deepEqual(section?.ranges, []);
-	assert.deepEqual(section?.unimportant_ranges, [
-		{
-			file_path: "src/App.tsx",
-			start_line: 10,
-			end_line: 24,
-			kind: "changed-new",
-			reason: "Import ordering only.",
-		},
-	]);
-});
-
 test("parseSectionProgressPayload accepts progressive range updates", () => {
 	const update = parseSectionProgressPayload({
 		section_id: "validation-flow",
@@ -134,39 +102,3 @@ test("parseSectionProgressPayload accepts progressive range updates", () => {
 	});
 });
 
-test("parseReviewSectionPayload keeps malformed unimportant ranges out", () => {
-	const section = parseReviewSectionPayload({
-		section_id: "ui-noise",
-		title: "UI noise",
-		intent: "Small visual-only changes.",
-		files: ["src/App.tsx"],
-		unimportant_ranges: [
-			{
-				file_path: "src/App.tsx",
-				start_line: 10,
-				end_line: 24,
-				kind: "changed-new",
-			},
-			{
-				file_path: "src/App.tsx",
-				start_line: 30,
-				end_line: 31,
-				kind: "changed-new",
-				reason: "Whitespace only.",
-			},
-		],
-		concerns: [],
-		base_ref: "base",
-		head_ref: "head",
-	});
-
-	assert.deepEqual(section?.unimportant_ranges, [
-		{
-			file_path: "src/App.tsx",
-			start_line: 30,
-			end_line: 31,
-			kind: "changed-new",
-			reason: "Whitespace only.",
-		},
-	]);
-});

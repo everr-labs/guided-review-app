@@ -28,15 +28,6 @@ pub struct LineRange {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct UnimportantRange {
-    pub file_path: String,
-    pub start_line: u32,
-    pub end_line: u32,
-    pub kind: RangeKind,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Concern {
     pub text: String,
     pub severity: Severity,
@@ -55,8 +46,6 @@ pub struct ReviewSection {
     pub files: Vec<String>,
     #[serde(default)]
     pub ranges: Vec<LineRange>,
-    #[serde(default)]
-    pub unimportant_ranges: Vec<UnimportantRange>,
     pub concerns: Vec<Concern>,
     pub base_ref: String,
     pub head_ref: String,
@@ -98,8 +87,6 @@ pub struct SectionProgressUpdate {
     pub files: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ranges: Option<Vec<LineRange>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unimportant_ranges: Option<Vec<UnimportantRange>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concerns: Option<Vec<Concern>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

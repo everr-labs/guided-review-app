@@ -38,7 +38,7 @@ import { SectionList } from "@/components/SectionList";
 import { DiffPane } from "@/components/DiffView";
 import { ChatPanel } from "@/components/ChatPanel";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, PanelLeft, PanelRight } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import {
 	recordClientTelemetry,
 	recordClientTelemetryError,
@@ -159,8 +159,6 @@ export default function App() {
 	const addCommentDraft = useApp((s) => s.addCommentDraft);
 	const applyCommentResult = useApp((s) => s.applyCommentResult);
 	const pushStderr = useApp((s) => s.pushStderr);
-	const chatVisible = useApp((s) => s.chatVisible);
-	const toggleChat = useApp((s) => s.toggleChat);
 	const [ghCliStatus, setGhCliStatus] = useState<GhCliStatus | null>(null);
 	const [ghCliDismissed, setGhCliDismissed] = useState(false);
 
@@ -338,8 +336,6 @@ export default function App() {
 				"acp.session_id": p.session_id,
 				"section.id": p.section.section_id,
 				"section.file_count": p.section.files.length,
-				"section.unimportant_range_count":
-					p.section.unimportant_ranges?.length ?? 0,
 				"section.concern_count": p.section.concerns.length,
 				"section.suppress_chat": p.suppress_chat ?? false,
 			});
@@ -359,8 +355,6 @@ export default function App() {
 				"section.id": p.update.section_id,
 				"section.phase": p.update.phase,
 				"section.file_count": p.update.files?.length,
-				"section.unimportant_range_count":
-					p.update.unimportant_ranges?.length,
 				"section.concern_count": p.update.concerns?.length,
 			});
 			upsertSectionProgress(p.update);
@@ -540,31 +534,16 @@ export default function App() {
 						{session.repo.head_ref} ← {session.repo.base_ref}
 					</span>
 				)}
-				<Button
-					size="icon"
-					variant="ghost"
-					onClick={toggleChat}
-					title={chatVisible ? "Hide chat" : "Show chat"}
-					aria-label={chatVisible ? "Hide chat" : "Show chat"}
-				>
-					{chatVisible ? (
-						<PanelRight className="size-4" />
-					) : (
-						<PanelLeft className="size-4" />
-					)}
-				</Button>
 			</header>
 			<main
 				className="grid min-h-0 overflow-hidden"
 				style={{
-					gridTemplateColumns: chatVisible
-						? "340px minmax(0, 1fr) 460px"
-						: "340px minmax(0, 1fr)",
+					gridTemplateColumns: "340px minmax(0, 1fr) 460px",
 				}}
 			>
 				<SectionList />
 				<DiffPane />
-				{chatVisible && <ChatPanel />}
+				<ChatPanel />
 			</main>
 			{errors.length > 0 && (
 				<div className="fixed bottom-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-xs text-destructive shadow-lg">

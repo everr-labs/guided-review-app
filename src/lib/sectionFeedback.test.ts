@@ -14,7 +14,6 @@ function section(overrides: Partial<ReviewSection> = {}): ReviewSection {
 		intent: "Review inline feedback.",
 		files: ["src/main.ts"],
 		ranges: [],
-		unimportant_ranges: [],
 		concerns: [],
 		base_ref: "base",
 		head_ref: "head",

@@ -16,18 +16,13 @@ import {
 	Maximize2,
 	Sparkles,
 	Wrench,
-	X,
 } from "lucide-react";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
 import {
 	prTargetFromSessionSource,
 	requestAgentPublishApprovedDrafts,
 } from "@/lib/commentPublish";
-import {
-	createDiffFocusRange,
-	formatDiffReferenceForMessage,
-	formatDiffReferenceLabel,
-} from "@/lib/diffFocus";
+import { createDiffFocusRange } from "@/lib/diffFocus";
 import { formatPublishedCommentsForPrompt } from "@/lib/publishedComments";
 import {
 	buildUserMessageWithReviewContext,
@@ -455,13 +450,6 @@ export function ChatPanel() {
 	const publishedCommentsError = useApp((s) => s.publishedCommentsError);
 	const addUserMessage = useApp((s) => s.addUserMessage);
 	const pushError = useApp((s) => s.pushError);
-	const pendingDiffReferences = useApp((s) => s.pendingDiffReferences);
-	const removePendingDiffReference = useApp(
-		(s) => s.removePendingDiffReference,
-	);
-	const clearPendingDiffReferences = useApp(
-		(s) => s.clearPendingDiffReferences,
-	);
 	const updateCommentDraft = useApp((s) => s.updateCommentDraft);
 
 	const [input, setInput] = useState("");
@@ -485,7 +473,7 @@ export function ChatPanel() {
 				inline: "nearest",
 			});
 		});
-	}, [chat, drafts, streaming, pendingDiffReferences]);
+	}, [chat, drafts, streaming]);
 
 	function handleChatScroll(e: React.UIEvent<HTMLDivElement>) {
 		stickToBottomRef.current = isChatScrolledToBottom(e.currentTarget);
@@ -494,11 +482,8 @@ export function ChatPanel() {
 	async function send() {
 		if (!session) return;
 		const text = input.trim();
-		if (!text && pendingDiffReferences.length === 0) return;
-		const refs = pendingDiffReferences
-			.map((r) => formatDiffReferenceForMessage(r))
-			.join("\n");
-		const body = refs ? (text ? `${refs}\n\n${text}` : refs) : text;
+		if (!text) return;
+		const body = text;
 		const snapshot = createReviewSnapshot({
 			current_section_id: currentSectionId,
 			sections,
@@ -515,11 +500,9 @@ export function ChatPanel() {
 		recordClientTelemetry("client.chat.send.requested", {
 			"acp.session_id": session.session_id,
 			"message.length": body.length,
-			"context.count": pendingDiffReferences.length,
 		});
 		setInput("");
 		addUserMessage(body);
-		clearPendingDiffReferences();
 		try {
 			await acp.sendMessage(session.session_id, messageToAgent, {
 				origin: "chat_panel_user_send",
@@ -712,26 +695,6 @@ export function ChatPanel() {
 						</span>
 					</div>
 				)}
-				{pendingDiffReferences.length > 0 && (
-					<div className="flex flex-wrap gap-1.5">
-						{pendingDiffReferences.map((c) => (
-							<span
-								key={c.id}
-								className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-2 py-0.5 font-mono text-[10px]"
-							>
-								{formatDiffReferenceLabel(c)}
-								<button
-									type="button"
-									className="text-muted-foreground hover:text-foreground"
-									onClick={() => removePendingDiffReference(c.id)}
-									aria-label="Remove reference"
-								>
-									<X className="size-3" />
-								</button>
-							</span>
-						))}
-					</div>
-				)}
 				<Textarea
 					ref={textareaRef}
 					value={input}
@@ -749,10 +712,7 @@ export function ChatPanel() {
 					<Button
 						size="sm"
 						onClick={send}
-						disabled={
-							!session ||
-							(!input.trim() && pendingDiffReferences.length === 0)
-						}
+						disabled={!session || !input.trim()}
 					>
 						Send
 					</Button>

@@ -65,17 +65,6 @@ test("DiffView starts each section with delete-only files closed and other loade
 	assert.doesNotMatch(source, /expandFiles\(allFilePaths\)/);
 });
 
-test("DiffView wires agent unimportant ranges into Pierre post render", async () => {
-	const source = await readFile(
-		new URL("./DiffView.tsx", import.meta.url),
-		"utf8",
-	);
-
-	assert.match(source, /unimportant_ranges/);
-	assert.match(source, /applyUnimportantRangeFolds/);
-	assert.match(source, /onPostRender/);
-});
-
 test("DiffView auto-expands the file the agent focuses on", async () => {
 	const source = await readFile(
 		new URL("./DiffView.tsx", import.meta.url),
@@ -106,7 +95,7 @@ test("DiffView shows a progressive loading message before section files arrive",
 	assert.match(source, /Agent is finding files and ranges/);
 });
 
-test("DiffView disables Pierre line selection and uses a right-click tag menu instead", async () => {
+test("DiffView disables Pierre line selection", async () => {
 	const source = await readFile(
 		new URL("./DiffView.tsx", import.meta.url),
 		"utf8",
@@ -115,9 +104,6 @@ test("DiffView disables Pierre line selection and uses a right-click tag menu in
 	assert.match(source, /enableLineSelection: false/);
 	assert.doesNotMatch(source, /enableLineSelection: true/);
 	assert.doesNotMatch(source, /onLineSelected/);
-	assert.match(source, /onContextMenu/);
-	assert.match(source, /resolveDiffSelectionRange/);
-	assert.match(source, /Tag selection/);
 });
 
 test("DiffView offers a feedback request for preview-only sections", async () => {

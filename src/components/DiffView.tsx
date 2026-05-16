@@ -1,25 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
-import type { DiffLineAnnotation, SelectedLineRange } from "@pierre/diffs";
+import type { DiffLineAnnotation } from "@pierre/diffs";
 import {
 	ChevronDown,
 	ChevronRight,
 	LocateFixed,
 	MessageSquare,
 	Sparkles,
-	Tag,
 } from "lucide-react";
 import { useApp } from "@/lib/store";
 import { acp } from "@/lib/acp";
 import { SeverityBadge } from "./SeverityBadge";
-import type { UnimportantRange } from "@/lib/types/section";
 import {
 	focusSideToPierreSide,
 	formatDiffFocusHeader,
 	type DiffFocusRange,
 	type DiffFocusSide,
 } from "@/lib/diffFocus";
-import { resolveDiffSelectionRange } from "@/lib/diffSelection";
 import { computeFileDiffStats, isDeletionOnlyDiff } from "@/lib/diffStats";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
 import {
@@ -33,12 +30,6 @@ import {
 	type SectionFeedbackAnnotationMetadata,
 	type SectionFeedbackNote,
 } from "@/lib/sectionFeedback";
-import {
-	applyUnimportantRangeFolds,
-	protectedLinesFromAnnotations,
-	rangeFoldId,
-	visibleUnimportantRangesForFile,
-} from "@/lib/unimportantRanges";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { stripMarkdownForSummary } from "@/lib/markdownContent";
 import type { ReviewSection } from "@/lib/types/section";
@@ -77,9 +68,7 @@ async function fetchFile(
 	return text;
 }
 
-function focusRangeToPierreSelection(
-	range: DiffFocusRange,
-): SelectedLineRange {
+function focusRangeToPierreSelection(range: DiffFocusRange) {
 	const side = focusSideToPierreSide(range.side);
 	return {
 		start: range.start_line,
@@ -197,13 +186,11 @@ function DiffFileCard({
 	collapsed,
 	sectionFeedbackAnnotations,
 	toggleFileCollapsed,
-	unimportantRanges,
 }: {
 	bundle: FileBundle;
 	collapsed: boolean;
 	sectionFeedbackAnnotations: DiffLineAnnotation<SectionFeedbackAnnotationMetadata>[];
 	toggleFileCollapsed: (filePath: string) => void;
-	unimportantRanges: UnimportantRange[];
 }) {
 	const activeFocus = useApp((s) => {
 		const focus = s.diffFocus;
@@ -212,22 +199,7 @@ function DiffFileCard({
 		if (focus.mode === "navigation") return focus;
 		return null;
 	});
-	const pendingDiffReferences = useApp((s) => s.pendingDiffReferences);
 	const publishedComments = useApp((s) => s.publishedComments);
-	const [revealedUnimportantRanges, setRevealedUnimportantRanges] = useState<
-		Record<string, true>
-	>({});
-	useEffect(() => {
-		setRevealedUnimportantRanges({});
-	}, [bundle.file_path, unimportantRanges]);
-
-	const pendingForFile = useMemo(
-		() =>
-			pendingDiffReferences.filter(
-				(range) => range.file_path === bundle.file_path,
-			),
-		[pendingDiffReferences, bundle.file_path],
-	);
 
 	const oldFile = useMemo(
 		() => ({ name: bundle.file_path, contents: bundle.oldText }),
@@ -238,11 +210,10 @@ function DiffFileCard({
 		[bundle.file_path, bundle.newText],
 	);
 
-	const selectedLines: SelectedLineRange | null = useMemo(() => {
-		const latestPending = pendingForFile.at(-1);
-		if (latestPending) return focusRangeToPierreSelection(latestPending);
-		return activeFocus ? focusRangeToPierreSelection(activeFocus) : null;
-	}, [pendingForFile, activeFocus]);
+	const selectedLines = useMemo(
+		() => (activeFocus ? focusRangeToPierreSelection(activeFocus) : null),
+		[activeFocus],
+	);
 
 	const lineAnnotations = useMemo(
 		(): DiffLineAnnotation<DiffAnnotationMetadata>[] => {
@@ -262,74 +233,8 @@ function DiffFileCard({
 		},
 		[publishedComments, sectionFeedbackAnnotations, bundle.file_path],
 	);
-	const visibleUnimportantRanges = useMemo(
-		() =>
-			visibleUnimportantRangesForFile(
-				unimportantRanges,
-				bundle.file_path,
-			).filter((range) => !revealedUnimportantRanges[rangeFoldId(range)]),
-		[unimportantRanges, bundle.file_path, revealedUnimportantRanges],
-	);
-	const protectedLines = useMemo(
-		() => protectedLinesFromAnnotations(lineAnnotations, selectedLines),
-		[lineAnnotations, selectedLines],
-	);
-	const revealUnimportantRange = useCallback((id: string) => {
-		setRevealedUnimportantRanges((current) =>
-			current[id] ? current : { ...current, [id]: true },
-		);
-	}, []);
 
 	const hostRef = useRef<HTMLDivElement>(null);
-	const [contextMenu, setContextMenu] = useState<{
-		x: number;
-		y: number;
-		range: DiffFocusRange;
-	} | null>(null);
-
-	const closeContextMenu = useCallback(() => setContextMenu(null), []);
-
-	const onContextMenu = useCallback(
-		(event: React.MouseEvent<HTMLDivElement>) => {
-			const host = hostRef.current?.querySelector("diffs-container");
-			if (!(host instanceof HTMLElement)) return;
-			const range = resolveDiffSelectionRange(host, bundle.file_path);
-			if (!range) return;
-			event.preventDefault();
-			setContextMenu({ x: event.clientX, y: event.clientY, range });
-		},
-		[bundle.file_path],
-	);
-
-	const onTagSelection = useCallback(() => {
-		if (!contextMenu) return;
-		recordClientTelemetry("client.diff.focus.selected", {
-			"file.path": contextMenu.range.file_path,
-			"line.start": contextMenu.range.start_line,
-			"line.end": contextMenu.range.end_line,
-			"line.side": contextMenu.range.side,
-		});
-		useApp.getState().addPendingDiffReference(contextMenu.range);
-		closeContextMenu();
-	}, [contextMenu, closeContextMenu]);
-
-	useEffect(() => {
-		if (!contextMenu) return;
-		const onDocMouseDown = (event: MouseEvent) => {
-			const menu = document.querySelector("[data-diff-context-menu]");
-			if (menu && menu.contains(event.target as Node)) return;
-			closeContextMenu();
-		};
-		const onKey = (event: KeyboardEvent) => {
-			if (event.key === "Escape") closeContextMenu();
-		};
-		window.addEventListener("mousedown", onDocMouseDown);
-		window.addEventListener("keydown", onKey);
-		return () => {
-			window.removeEventListener("mousedown", onDocMouseDown);
-			window.removeEventListener("keydown", onKey);
-		};
-	}, [contextMenu, closeContextMenu]);
 
 	useEffect(() => {
 		if (collapsed) return;
@@ -409,17 +314,6 @@ function DiffFileCard({
 			</span>
 		);
 	}, [hasAgentNotes, noteCount]);
-	const onPostRender = useCallback(
-		(node: HTMLElement) => {
-			applyUnimportantRangeFolds(
-				node,
-				visibleUnimportantRanges,
-				protectedLines,
-				revealUnimportantRange,
-			);
-		},
-		[protectedLines, revealUnimportantRange, visibleUnimportantRanges],
-	);
 
 	const options = useMemo(
 		() => ({
@@ -427,9 +321,8 @@ function DiffFileCard({
 			diffStyle: "unified" as const,
 			enableLineSelection: false,
 			collapsed,
-			onPostRender,
 		}),
-		[collapsed, onPostRender],
+		[collapsed],
 	);
 
 	return (
@@ -437,7 +330,6 @@ function DiffFileCard({
 			ref={hostRef}
 			data-file-path={bundle.file_path}
 			data-expanded={collapsed ? "false" : "true"}
-			onContextMenu={onContextMenu}
 			className="relative overflow-hidden rounded-md border border-border bg-card"
 		>
 			<MultiFileDiff
@@ -450,52 +342,6 @@ function DiffFileCard({
 				renderHeaderPrefix={renderHeaderPrefix}
 				renderHeaderMetadata={renderHeaderMetadata}
 			/>
-			{contextMenu && (
-				<DiffContextMenu
-					x={contextMenu.x}
-					y={contextMenu.y}
-					range={contextMenu.range}
-					onTag={onTagSelection}
-				/>
-			)}
-		</div>
-	);
-}
-
-function DiffContextMenu({
-	x,
-	y,
-	range,
-	onTag,
-}: {
-	x: number;
-	y: number;
-	range: DiffFocusRange;
-	onTag: () => void;
-}) {
-	const sideLabel = range.side === "LEFT" ? "old" : "new";
-	const lineLabel =
-		range.start_line === range.end_line
-			? `${range.start_line}`
-			: `${range.start_line}–${range.end_line}`;
-	return (
-		<div
-			data-diff-context-menu
-			className="fixed z-50 min-w-[200px] overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md"
-			style={{ left: x, top: y }}
-			onMouseDown={(event) => event.stopPropagation()}
-		>
-			<button
-				type="button"
-				onClick={onTag}
-				className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent"
-			>
-				<Tag className="size-3.5" />
-				<span className="flex-1">Tag selection</span>
-				<span className="font-mono text-[10px] text-muted-foreground">
-					{`${lineLabel} (${sideLabel})`}
-				</span>
-			</button>
 		</div>
 	);
 }
@@ -1019,7 +865,6 @@ export function DiffPane() {
 						collapsed={Boolean(collapsedFiles[b.file_path])}
 						sectionFeedbackAnnotations={sectionFeedbackAnnotations}
 						toggleFileCollapsed={toggleFileCollapsed}
-						unimportantRanges={section!.unimportant_ranges ?? []}
 					/>
 				))}
 			</div>

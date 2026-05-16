@@ -66,7 +66,6 @@ const snapshot: ReviewSnapshot = {
 						kind: "changed-new",
 					},
 				],
-				unimportant_ranges: [],
 				concerns: [
 					{
 						text: "Empty coupon still passes.",

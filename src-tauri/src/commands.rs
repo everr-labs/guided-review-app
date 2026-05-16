@@ -120,7 +120,7 @@ The block must be feedback-only and must use this shape:
 }}
 ```
 
-Do not include `title`, `intent`, `files`, `ranges`, `unimportant_ranges`, `base_ref`, or `head_ref`.
+Do not include `title`, `intent`, `files`, `ranges`, `base_ref`, or `head_ref`.
 If there are no actionable concerns, emit `"concerns": []`.
 "#,
         repo_path = repo_path.display(),
@@ -644,7 +644,7 @@ mod tests {
         assert!(prompt.contains("Head ref: feature"));
         assert!(prompt.contains("Existing published comments:\n- Already covered."));
         assert!(prompt.contains("Emit exactly one final ```acp-section fenced block"));
-        assert!(prompt.contains("Do not include `title`, `intent`, `files`, `ranges`, `unimportant_ranges`, `base_ref`, or `head_ref`"));
+        assert!(prompt.contains("Do not include `title`, `intent`, `files`, `ranges`, `base_ref`, or `head_ref`"));
     }
 
     #[test]

@@ -14,10 +14,6 @@ export interface LineRange {
 	kind: RangeKind;
 }
 
-export interface UnimportantRange extends LineRange {
-	reason: string;
-}
-
 export interface Concern {
 	text: string;
 	severity: Severity;
@@ -32,7 +28,6 @@ export interface ReviewSection {
 	intent: string;
 	files: string[];
 	ranges: LineRange[];
-	unimportant_ranges: UnimportantRange[];
 	concerns: Concern[];
 	base_ref: string;
 	head_ref: string;
@@ -61,7 +56,6 @@ export interface SectionProgressUpdate {
 	intent?: string;
 	files?: string[];
 	ranges?: LineRange[];
-	unimportant_ranges?: UnimportantRange[];
 	concerns?: Concern[];
 	base_ref?: string;
 	head_ref?: string;

@@ -104,7 +104,7 @@ The app derives changed line ranges from local Git for these files. Do not inclu
 
 ### ` ```acp-section ` (emit once per section the user asks to see)
 
-`acp-section` is feedback only. Do not include `title`, `intent`, `files`, `ranges`, `unimportant_ranges`, `base_ref`, or `head_ref`; the host already owns those from the section map and local Git.
+`acp-section` is feedback only. Do not include `title`, `intent`, `files`, `ranges`, `base_ref`, or `head_ref`; the host already owns those from the section map and local Git.
 
 If the `guided_review_update_section` tool is available, you may call it for feedback fields. Do not use it for files or ranges. When you delegate analysis to a sub-agent (see "Per-section delegation"), use only `"phase": "started"` before dispatching and skip progressive `"feedback"` calls — you have nothing incremental to share until the sub-agent returns. When you do the analysis directly, you may make progressive calls as you work.
 

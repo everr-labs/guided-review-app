@@ -55,7 +55,6 @@ function emptyFeedbackSection(
 		intent,
 		files: [],
 		ranges: [],
-		unimportant_ranges: [],
 		concerns: [],
 		base_ref: session?.repo.base_ref ?? "",
 		head_ref: session?.repo.head_ref ?? "",
@@ -115,8 +114,6 @@ function mergeSectionProgress(
 		ranges: previousHasStructure
 			? previous?.ranges ?? []
 			: update.ranges ?? previous?.ranges ?? [],
-		unimportant_ranges:
-			update.unimportant_ranges ?? previous?.unimportant_ranges ?? [],
 		concerns: update.concerns ?? previous?.concerns ?? [],
 		base_ref: update.base_ref ?? previous?.base_ref ?? session?.repo.base_ref ?? "",
 		head_ref: update.head_ref ?? previous?.head_ref ?? session?.repo.head_ref ?? "",
@@ -138,9 +135,6 @@ function mergeSectionFeedback(
 		intent: previous?.intent ?? existing?.intent ?? section.intent,
 		files: previousHasStructure ? previous?.files ?? [] : section.files ?? [],
 		ranges: previousHasStructure ? previous?.ranges ?? [] : section.ranges ?? [],
-		unimportant_ranges: previous
-			? previous.unimportant_ranges
-			: section.unimportant_ranges ?? [],
 		concerns: section.concerns ?? [],
 		base_ref: previousHasStructure
 			? previous?.base_ref ?? ""
@@ -207,11 +201,9 @@ interface AppState {
 	streaming: boolean;
 	errors: string[];
 	stderr: string[];
-	chatVisible: boolean;
 	structuredReviewBlockOpen: boolean;
 	diffFocus: DiffFocusRange | null;
 	diffFocusError: string | null;
-	pendingDiffReferences: DiffFocusRange[];
 
 	setProject: (p: LocalProject | null) => void;
 	setSession: (s: SessionInfo | null) => void;
@@ -244,27 +236,9 @@ interface AppState {
 	pushStderr: (line: string) => void;
 	setStreaming: (s: boolean) => void;
 
-	toggleChat: () => void;
-
 	setDiffFocus: (range: DiffFocusRange | null) => void;
 	clearDiffFocus: (id?: string) => void;
 	setDiffFocusError: (error: string | null) => void;
-	addPendingDiffReference: (range: DiffFocusRange) => void;
-	removePendingDiffReference: (id: string) => void;
-	clearPendingDiffReferences: () => void;
-}
-
-const LS_KEYS = {
-	chatVisible: "gr.chatVisible",
-} as const;
-
-function loadBool(key: string, fallback: boolean): boolean {
-	try {
-		const v = localStorage.getItem(key);
-		return v === null ? fallback : v === "1";
-	} catch {
-		return fallback;
-	}
 }
 
 function prDescriptionFromSession(
@@ -485,11 +459,9 @@ export const useApp = create<AppState>((set) => ({
 	streaming: false,
 	errors: [],
 	stderr: [],
-	chatVisible: loadBool(LS_KEYS.chatVisible, true),
 	structuredReviewBlockOpen: false,
 	diffFocus: null,
 	diffFocusError: null,
-	pendingDiffReferences: [],
 
 	setProject: (p) =>
 		set((state) => {
@@ -520,7 +492,6 @@ export const useApp = create<AppState>((set) => ({
 					structuredReviewBlockOpen: false,
 					diffFocus: null,
 					diffFocusError: null,
-					pendingDiffReferences: [],
 				};
 			}),
 
@@ -543,7 +514,6 @@ export const useApp = create<AppState>((set) => ({
 				publishedComments: s?.published_comments ?? [],
 				publishedCommentsFetchedAt: s ? Date.now() : null,
 				publishedCommentsError: s?.published_comments_error ?? null,
-				pendingDiffReferences: [],
 			});
 		},
 		restoreSavedReview: (session, snapshot) => {
@@ -572,7 +542,6 @@ export const useApp = create<AppState>((set) => ({
 				structuredReviewBlockOpen: false,
 				diffFocus: null,
 				diffFocusError: null,
-				pendingDiffReferences: [],
 			});
 		},
 		reset: () =>
@@ -597,7 +566,6 @@ export const useApp = create<AppState>((set) => ({
 					structuredReviewBlockOpen: false,
 					diffFocus: null,
 					diffFocusError: null,
-					pendingDiffReferences: [],
 				};
 			}),
 
@@ -682,8 +650,6 @@ export const useApp = create<AppState>((set) => ({
 					"section.current_id": state.currentSectionId,
 					"section.processing_ids": state.processingSectionIds.join(","),
 					"section.file_count": normalizedSection.files.length,
-					"section.unimportant_range_count":
-						section.unimportant_ranges?.length ?? 0,
 				});
 				return {
 					sections,
@@ -722,7 +688,6 @@ export const useApp = create<AppState>((set) => ({
 					"section.was_known": idx >= 0,
 					"section.current_id": state.currentSectionId,
 					"section.file_count": section.files.length,
-					"section.unimportant_range_count": section.unimportant_ranges.length,
 					"section.concern_count": section.concerns.length,
 				});
 				return {
@@ -997,15 +962,6 @@ export const useApp = create<AppState>((set) => ({
 
 	setStreaming: (s) => set({ streaming: s }),
 
-	toggleChat: () =>
-		set((state) => {
-			const next = !state.chatVisible;
-			try {
-				localStorage.setItem(LS_KEYS.chatVisible, next ? "1" : "0");
-			} catch {}
-			return { chatVisible: next };
-		}),
-
 	setDiffFocus: (range) =>
 		set((state) => {
 			recordClientTelemetry("client.store.diff_focus.set", {
@@ -1025,25 +981,4 @@ export const useApp = create<AppState>((set) => ({
 			return { diffFocus: null };
 		}),
 	setDiffFocusError: (error) => set({ diffFocusError: error }),
-	addPendingDiffReference: (range) =>
-		set((state) => {
-			const exists = state.pendingDiffReferences.some(
-				(r) =>
-					r.file_path === range.file_path &&
-					r.side === range.side &&
-					r.start_line === range.start_line &&
-					r.end_line === range.end_line,
-			);
-			if (exists) return {};
-			return {
-				pendingDiffReferences: [...state.pendingDiffReferences, range],
-			};
-		}),
-	removePendingDiffReference: (id) =>
-		set((state) => ({
-			pendingDiffReferences: state.pendingDiffReferences.filter(
-				(r) => r.id !== id,
-			),
-		})),
-	clearPendingDiffReferences: () => set({ pendingDiffReferences: [] }),
 }));

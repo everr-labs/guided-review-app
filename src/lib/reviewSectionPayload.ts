@@ -8,7 +8,6 @@ import type {
 	SectionMap,
 	SectionMapEntry,
 	Severity,
-	UnimportantRange,
 } from "./types/section";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -84,16 +83,6 @@ export function parseLineRange(value: unknown): LineRange | null {
 	return { file_path, start_line, end_line, kind };
 }
 
-export function parseUnimportantRange(
-	value: unknown,
-): UnimportantRange | null {
-	const range = parseLineRange(value);
-	const record = asRecord(value);
-	const reason = record ? asString(record.reason)?.trim() : null;
-	if (!range || !reason) return null;
-	return { ...range, reason };
-}
-
 export function parseConcern(value: unknown): Concern | null {
 	const record = asRecord(value);
 	if (!record) return null;
@@ -152,10 +141,6 @@ export function parseReviewSectionPayload(
 		intent,
 		files: asStringArray(record.files),
 		ranges: parseArray(record.ranges, parseLineRange),
-		unimportant_ranges: parseArray(
-			record.unimportant_ranges,
-			parseUnimportantRange,
-		),
 		concerns: parseArray(record.concerns, parseConcern),
 		base_ref: asString(record.base_ref) ?? "",
 		head_ref: asString(record.head_ref) ?? "",
@@ -178,10 +163,6 @@ export function parseSectionProgressPayload(
 	const title = asString(record.title);
 	const intent = asString(record.intent);
 	const ranges = parseOptionalArray(record.ranges, parseLineRange);
-	const unimportant_ranges = parseOptionalArray(
-		record.unimportant_ranges,
-		parseUnimportantRange,
-	);
 	const concerns = parseOptionalArray(record.concerns, parseConcern);
 	const base_ref = asString(record.base_ref);
 	const head_ref = asString(record.head_ref);
@@ -189,7 +170,6 @@ export function parseSectionProgressPayload(
 	if (intent) update.intent = intent;
 	if (Array.isArray(record.files)) update.files = asStringArray(record.files);
 	if (ranges) update.ranges = ranges;
-	if (unimportant_ranges) update.unimportant_ranges = unimportant_ranges;
 	if (concerns) update.concerns = concerns;
 	if (base_ref) update.base_ref = base_ref;
 	if (head_ref) update.head_ref = head_ref;
