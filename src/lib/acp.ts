@@ -85,7 +85,7 @@ export interface StartSessionResponse {
 	saved_review?: SavedReviewRecord;
 }
 
-export interface StartSectionTaskRequest {
+interface StartSectionTaskRequest {
 	parent_session_id: string;
 	section_id: string;
 	title: string;
@@ -94,10 +94,9 @@ export interface StartSectionTaskRequest {
 	base_ref: string;
 	head_ref: string;
 	published_comment_context: string;
-	additional_concerns_hint?: string;
 }
 
-export interface DiffPatch {
+interface DiffPatch {
 	file_path: string;
 	patch: string;
 }

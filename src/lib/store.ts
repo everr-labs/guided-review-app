@@ -33,7 +33,7 @@ export interface SessionInfo {
 	published_comments_error?: string;
 }
 
-export const PR_DESCRIPTION_SECTION_ID = "pr-description";
+const PR_DESCRIPTION_SECTION_ID = "pr-description";
 
 function hasSectionFeedback(section: ReviewSection): boolean {
 	return (

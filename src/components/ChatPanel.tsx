@@ -14,7 +14,6 @@ import {
 	LoaderCircle,
 	Map,
 	Maximize2,
-	Sparkles,
 	Wrench,
 } from "lucide-react";
 import { recordClientTelemetry, recordClientTelemetryError } from "@/lib/telemetry";
@@ -23,7 +22,6 @@ import {
 	requestAgentPublishApprovedDrafts,
 } from "@/lib/commentPublish";
 import { createDiffFocusRange } from "@/lib/diffFocus";
-import { formatPublishedCommentsForPrompt } from "@/lib/publishedComments";
 import {
 	buildUserMessageWithReviewContext,
 	createReviewSnapshot,
@@ -174,14 +172,8 @@ function FeedbackList({
 function ReviewSectionCard({ section }: { section: ReviewSection }) {
 	const hasFeedback = section.concerns.length > 0;
 	const sectionId = section.section_id;
-	const isProcessing = useApp((s) =>
-		s.processingSectionIds.includes(sectionId),
-	);
 	const setCurrentSection = useApp((s) => s.setCurrentSection);
 	const setDiffFocus = useApp((s) => s.setDiffFocus);
-	const startSectionProcessing = useApp((s) => s.startSectionProcessing);
-	const finishSectionProcessing = useApp((s) => s.finishSectionProcessing);
-	const pushError = useApp((s) => s.pushError);
 
 	const openConcernLocation = useCallback(
 		(concern: Concern) => {
@@ -199,44 +191,6 @@ function ReviewSectionCard({ section }: { section: ReviewSection }) {
 		},
 		[sectionId, setCurrentSection, setDiffFocus],
 	);
-
-	const requestMoreConcerns = useCallback(async () => {
-		const state = useApp.getState();
-		const session = state.session;
-		if (!session) return;
-		const current = state.sections.find((s) => s.id === sectionId);
-		if (current?.kind !== "review_section") return;
-		const liveSection = current.section ?? section;
-		startSectionProcessing(sectionId);
-		try {
-			const publishedCommentContext = formatPublishedCommentsForPrompt(
-				state.publishedComments,
-				state.publishedCommentsError ?? undefined,
-			);
-			await acp.startSectionTask({
-				parent_session_id: session.session_id,
-				section_id: sectionId,
-				title: current.title || liveSection.title,
-				intent: current.intent || liveSection.intent,
-				files: liveSection.files,
-				base_ref: liveSection.base_ref || session.repo.base_ref,
-				head_ref: liveSection.head_ref || session.repo.head_ref,
-				published_comment_context: publishedCommentContext,
-				additional_concerns_hint: buildExistingConcernsHint(
-					liveSection.concerns,
-				),
-			});
-		} catch (e) {
-			finishSectionProcessing(sectionId);
-			pushError(`load more concerns failed: ${e}`);
-		}
-	}, [
-		section,
-		sectionId,
-		startSectionProcessing,
-		finishSectionProcessing,
-		pushError,
-	]);
 
 	return (
 		<div className="rounded-md border border-border bg-card px-3 py-2 text-sm">
@@ -278,28 +232,6 @@ function ReviewSectionCard({ section }: { section: ReviewSection }) {
 					No concerns found for this section.
 				</div>
 			)}
-			<div className="mt-3 flex justify-end">
-				<Button
-					type="button"
-					variant="ghost"
-					size="sm"
-					onClick={requestMoreConcerns}
-					disabled={isProcessing}
-					className="h-7 px-2 text-[11px] text-muted-foreground hover:text-foreground"
-					title={
-						hasFeedback
-							? "Ask the agent for additional concerns"
-							: "Re-run the agent for this section"
-					}
-				>
-					{isProcessing ? (
-						<LoaderCircle className="size-3 animate-spin" />
-					) : (
-						<Sparkles className="size-3" />
-					)}
-					{hasFeedback ? "Load more concerns" : "Load concerns"}
-				</Button>
-			</div>
 		</div>
 	);
 }
@@ -335,28 +267,6 @@ function ChatItemView({ item }: { item: ChatItem }) {
 	}
 
 	return null;
-}
-
-function buildExistingConcernsHint(concerns: Concern[]): string | undefined {
-	if (concerns.length === 0) return undefined;
-	const lines = concerns
-		.map((concern) => {
-			const text = concern.text.trim();
-			if (!text) return null;
-			const location = concern.file_path
-				? concern.line
-					? ` (${concern.file_path}:${concern.line})`
-					: ` (${concern.file_path})`
-				: "";
-			return `- ${text}${location}`;
-		})
-		.filter((line): line is string => line !== null);
-	if (lines.length === 0) return undefined;
-	return [
-		"Concerns already surfaced for this section (do not repeat these — look for additional, distinct issues):",
-		...lines,
-		"Re-emit the full concerns list including these existing ones plus any new ones you find.",
-	].join("\n");
 }
 
 function partsFromMessage(message: ChatMessage): ChatMessagePart[] {

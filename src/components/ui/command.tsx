@@ -73,18 +73,6 @@ export const CommandGroup = React.forwardRef<
 ));
 CommandGroup.displayName = "CommandGroup";
 
-export const CommandSeparator = React.forwardRef<
-	React.ElementRef<typeof CommandPrimitive.Separator>,
-	React.ComponentPropsWithoutRef<typeof CommandPrimitive.Separator>
->(({ className, ...props }, ref) => (
-	<CommandPrimitive.Separator
-		ref={ref}
-		className={cn("-mx-1 h-px bg-border", className)}
-		{...props}
-	/>
-));
-CommandSeparator.displayName = "CommandSeparator";
-
 export const CommandItem = React.forwardRef<
 	React.ElementRef<typeof CommandPrimitive.Item>,
 	React.ComponentPropsWithoutRef<typeof CommandPrimitive.Item>
@@ -99,16 +87,3 @@ export const CommandItem = React.forwardRef<
 	/>
 ));
 CommandItem.displayName = "CommandItem";
-
-export const CommandShortcut = ({
-	className,
-	...props
-}: React.HTMLAttributes<HTMLSpanElement>) => (
-	<span
-		className={cn(
-			"ml-auto text-xs tracking-widest text-muted-foreground",
-			className,
-		)}
-		{...props}
-	/>
-);

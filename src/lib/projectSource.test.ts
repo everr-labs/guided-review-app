@@ -8,9 +8,8 @@ import {
 	parsePrInput,
 	saveLastProjectPath,
 	type LocalProject,
-	type LocalRepoOrigin,
 } from "./projectSource";
-import type { RecentProject } from "./acp";
+import type { LocalRepoOrigin, RecentProject } from "./acp";
 
 const origin: LocalRepoOrigin = {
 	repo_url: "https://github.com/openai/codex",

@@ -26,17 +26,9 @@ export interface CreateDiffFocusRangeInput {
 	now?: number;
 }
 
-export interface DiffFocusPayload {
-	file_path: string;
-	start_line: number;
-	end_line: number;
-	side: DiffFocusSide;
-	reason?: string;
-}
-
 export type PierreSide = "additions" | "deletions";
 
-export function normalizeLineRange(start: number, end: number): [number, number] {
+function normalizeLineRange(start: number, end: number): [number, number] {
 	return start <= end ? [start, end] : [end, start];
 }
 
@@ -58,10 +50,6 @@ function rangeRef(
 	const [start, end] = normalizeLineRange(range.start_line, range.end_line);
 	const suffix = start === end ? `${start}` : `${start}-${end}`;
 	return `${range.file_path}:${suffix} (${sideLabel(range.side)})`;
-}
-
-export function pierreSideToFocusSide(side: PierreSide): DiffFocusSide {
-	return side === "additions" ? "RIGHT" : "LEFT";
 }
 
 export function focusSideToPierreSide(side: DiffFocusSide): PierreSide {
@@ -92,33 +80,6 @@ export function createDiffFocusRange(
 	};
 	if (reason) range.reason = reason;
 	return range;
-}
-
-export function parseDiffFocusPayload(raw: unknown): DiffFocusPayload | null {
-	if (!raw || typeof raw !== "object") return null;
-	const record = raw as Record<string, unknown>;
-	const filePath =
-		typeof record.file_path === "string" ? record.file_path.trim() : "";
-	const startLine = record.start_line;
-	const endLine = record.end_line;
-	const side = record.side;
-	const reason = record.reason;
-
-	if (!filePath || !isPositiveInteger(startLine) || !isPositiveInteger(endLine)) {
-		return null;
-	}
-	if (!isDiffFocusSide(side)) return null;
-
-	const payload: DiffFocusPayload = {
-		file_path: filePath,
-		start_line: startLine,
-		end_line: endLine,
-		side,
-	};
-	if (typeof reason === "string" && reason.trim()) {
-		payload.reason = reason.trim();
-	}
-	return payload;
 }
 
 export function formatDiffFocusHeader(range: DiffFocusRange): string {

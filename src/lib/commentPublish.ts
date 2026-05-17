@@ -77,7 +77,7 @@ export function buildAgentPublishCommentPrompt(args: {
 	].join("\n");
 }
 
-export function approvedCommentDrafts(
+function approvedCommentDrafts(
 	drafts: CommentDraftState[],
 ): CommentDraftState[] {
 	return drafts.filter((draft) => draft.status === "approved");

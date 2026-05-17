@@ -9,7 +9,14 @@ import {
 import { logs, type Logger, type LogRecord } from "@opentelemetry/api-logs";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { StackContextManager } from "@opentelemetry/sdk-trace-web";
-import { recordClientTelemetry } from "./telemetry";
+import {
+	captureTelemetryContext,
+	createClientAutoInstrumentationConfig,
+	createClientAutoInstrumentations,
+	recordClientTelemetry,
+	registerGlobalBrowserErrorHandlers,
+	withTelemetryContext,
+} from "./telemetry";
 
 test.afterEach(() => {
 	otelContext.disable();
@@ -41,18 +48,7 @@ test("recordClientTelemetry sends log timestamps as Date values", () => {
 	assert.equal(emitted.observedTimestamp, emitted.timestamp);
 });
 
-test("captureTelemetryContext injects the active W3C trace context", async () => {
-	const telemetry = await import("./telemetry");
-	const captureTelemetryContext = (
-		telemetry as {
-			captureTelemetryContext?: (ctx?: ReturnType<typeof otelContext.active>) => Record<string, string>;
-		}
-	).captureTelemetryContext;
-
-	if (typeof captureTelemetryContext !== "function") {
-		assert.fail("captureTelemetryContext should be exported");
-	}
-
+test("captureTelemetryContext injects the active W3C trace context", () => {
 	propagation.setGlobalPropagator(new W3CTraceContextPropagator());
 	const span = trace.wrapSpanContext({
 		traceId: "0af7651916cd43dd8448eb211c80319c",
@@ -70,21 +66,7 @@ test("captureTelemetryContext injects the active W3C trace context", async () =>
 	);
 });
 
-test("withTelemetryContext makes an extracted W3C trace context active", async () => {
-	const telemetry = await import("./telemetry");
-	const withTelemetryContext = (
-		telemetry as {
-			withTelemetryContext?: <T>(
-				carrier: Record<string, string> | undefined,
-				fn: () => T,
-			) => T;
-		}
-	).withTelemetryContext;
-
-	if (typeof withTelemetryContext !== "function") {
-		assert.fail("withTelemetryContext should be exported");
-	}
-
+test("withTelemetryContext makes an extracted W3C trace context active", () => {
 	otelContext.setGlobalContextManager(new StackContextManager().enable());
 	propagation.setGlobalPropagator(new W3CTraceContextPropagator());
 	const traceId = withTelemetryContext(
@@ -98,34 +80,11 @@ test("withTelemetryContext makes an extracted W3C trace context active", async (
 	assert.equal(traceId, "0af7651916cd43dd8448eb211c80319c");
 });
 
-test("client auto-instrumentations ignore telemetry exporter requests", async () => {
-	const telemetry = await import("./telemetry");
-	const createClientAutoInstrumentationConfig = (
-		telemetry as {
-			createClientAutoInstrumentationConfig?: () => Record<
-				string,
-				{
-					ignoreUrls?: Array<string | RegExp>;
-				}
-			>;
-		}
-	).createClientAutoInstrumentationConfig;
-	const createClientAutoInstrumentations = (
-		telemetry as {
-			createClientAutoInstrumentations?: () => Array<{
-				instrumentationName: string;
-			}>;
-		}
-	).createClientAutoInstrumentations;
-
-	if (typeof createClientAutoInstrumentationConfig !== "function") {
-		assert.fail("createClientAutoInstrumentationConfig should be exported");
-	}
-	if (typeof createClientAutoInstrumentations !== "function") {
-		assert.fail("createClientAutoInstrumentations should be exported");
-	}
-
-	const config = createClientAutoInstrumentationConfig();
+test("client auto-instrumentations ignore telemetry exporter requests", () => {
+	const config = createClientAutoInstrumentationConfig() as Record<
+		string,
+		{ ignoreUrls?: Array<string | RegExp> }
+	>;
 	const instrumentations = createClientAutoInstrumentations();
 	const names = instrumentations.map(
 		(instrumentation) => instrumentation.instrumentationName,
@@ -144,23 +103,7 @@ test("client auto-instrumentations ignore telemetry exporter requests", async ()
 	}
 });
 
-test("global browser error hooks record errors and unhandled rejections", async () => {
-	const telemetry = await import("./telemetry");
-	const registerGlobalBrowserErrorHandlers = (
-		telemetry as {
-			registerGlobalBrowserErrorHandlers?: (target: {
-				addEventListener(
-					type: string,
-					listener: (event: unknown) => void,
-				): void;
-			}) => void;
-		}
-	).registerGlobalBrowserErrorHandlers;
-
-	if (typeof registerGlobalBrowserErrorHandlers !== "function") {
-		assert.fail("registerGlobalBrowserErrorHandlers should be exported");
-	}
-
+test("global browser error hooks record errors and unhandled rejections", () => {
 	const emitted: LogRecord[] = [];
 	const logger: Logger = {
 		emit(record) {
@@ -179,10 +122,10 @@ test("global browser error hooks record errors and unhandled rejections", async 
 	});
 
 	registerGlobalBrowserErrorHandlers({
-		addEventListener(type, listener) {
+		addEventListener(type: string, listener: (event: unknown) => void) {
 			listeners.set(type, listener);
 		},
-	});
+	} as Parameters<typeof registerGlobalBrowserErrorHandlers>[0]);
 
 	const scriptError = new Error("render failed");
 	listeners.get("error")?.({

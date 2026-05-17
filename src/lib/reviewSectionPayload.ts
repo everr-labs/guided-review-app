@@ -58,7 +58,7 @@ function parseSectionProgressPhase(value: unknown): SectionProgressPhase | null 
 		: null;
 }
 
-export function parseSectionMapEntry(value: unknown): SectionMapEntry | null {
+function parseSectionMapEntry(value: unknown): SectionMapEntry | null {
 	const record = asRecord(value);
 	if (!record) return null;
 	const section_id = asString(record.section_id);
@@ -70,7 +70,7 @@ export function parseSectionMapEntry(value: unknown): SectionMapEntry | null {
 	return entry;
 }
 
-export function parseLineRange(value: unknown): LineRange | null {
+function parseLineRange(value: unknown): LineRange | null {
 	const record = asRecord(value);
 	if (!record) return null;
 	const file_path = asString(record.file_path);
@@ -83,7 +83,7 @@ export function parseLineRange(value: unknown): LineRange | null {
 	return { file_path, start_line, end_line, kind };
 }
 
-export function parseConcern(value: unknown): Concern | null {
+function parseConcern(value: unknown): Concern | null {
 	const record = asRecord(value);
 	if (!record) return null;
 	const text = asString(record.text);
@@ -97,7 +97,7 @@ export function parseConcern(value: unknown): Concern | null {
 	};
 }
 
-export function parseArray<T>(
+function parseArray<T>(
 	value: unknown,
 	parse: (entry: unknown) => T | null,
 ): T[] {

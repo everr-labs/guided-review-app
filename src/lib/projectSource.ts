@@ -1,4 +1,4 @@
-import type { RecentProject, SessionSource } from "./acp";
+import type { LocalRepoOrigin, RecentProject, SessionSource } from "./acp";
 
 export type LocalRecentProject = Extract<RecentProject, { kind: "local" }>;
 
@@ -8,13 +8,6 @@ export interface ParsedPrInput {
 	repo?: string;
 	repoSlug?: string;
 	rawKind: "number" | "url";
-}
-
-export interface LocalRepoOrigin {
-	repo_url: string;
-	owner: string;
-	repo: string;
-	slug: string;
 }
 
 export interface LocalProject {
